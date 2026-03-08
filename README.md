@@ -37,7 +37,7 @@ NEXT_PUBLIC_APP_URL=http://localhost:3000
 Recommended backend env:
 
 ```env
-LOYALTY_SCAN_START_BLOCK=43103600
+LOYALTY_SCAN_START_BLOCK=43103775
 ```
 
 If you omit `LOYALTY_SCAN_START_BLOCK`, the API auto-detects the deployment block of the Mineloot contracts and scans from there. That works, but the first requests are slower.
@@ -58,7 +58,7 @@ RPC_URL_PRIMARY=https://mainnet.base.org
 RPC_URL_FALLBACK_1=https://base.llamarpc.com
 RPC_URL_FALLBACK_2=https://rpc.ankr.com/base
 RPC_URL_FALLBACK_3=https://base-rpc.publicnode.com
-LOYALTY_SCAN_START_BLOCK=43103600
+LOYALTY_SCAN_START_BLOCK=43103775
 SUPABASE_URL=
 SUPABASE_SERVICE_ROLE_KEY=
 ```
