@@ -41,3 +41,29 @@ LOYALTY_SCAN_START_BLOCK=43103600
 ```
 
 If you omit `LOYALTY_SCAN_START_BLOCK`, the API auto-detects the deployment block of the Mineloot contracts and scans from there. That works, but the first requests are slower.
+
+## Deploy on Railway
+
+This repo is ready for Railway with:
+- [railway.json](/Users/brain/.openclaw/workspace/mineloot-api/railway.json)
+- `npm run build`
+- `npm run start`
+
+Use these Railway environment variables:
+
+```env
+CORS_ORIGIN=https://mineloot.app
+NEXT_PUBLIC_APP_URL=https://mineloot.app
+RPC_URL_PRIMARY=https://mainnet.base.org
+RPC_URL_FALLBACK_1=https://base.llamarpc.com
+RPC_URL_FALLBACK_2=https://rpc.ankr.com/base
+RPC_URL_FALLBACK_3=https://base-rpc.publicnode.com
+LOYALTY_SCAN_START_BLOCK=43103600
+SUPABASE_URL=
+SUPABASE_SERVICE_ROLE_KEY=
+```
+
+Notes:
+- `PORT` is injected by Railway automatically.
+- Supabase is optional. If omitted, profile endpoints still work but return empty profile data.
+- Healthcheck path is `/health`.
