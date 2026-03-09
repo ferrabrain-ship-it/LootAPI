@@ -12,13 +12,13 @@
   "dependencies": {
     "@fastify/cors": "^10.0.1",
     "@supabase/supabase-js": "^2.49.1",
-    "@types/node": "^22.13.10",
     "dotenv": "^16.4.7",
     "fastify": "^5.2.1",
-    "typescript": "^5.8.2",
     "viem": "^2.37.5"
   },
   "devDependencies": {
-    "tsx": "^4.19.3"
+    "@types/node": "^22.13.10",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.2"
   }
 }

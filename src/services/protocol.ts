@@ -31,11 +31,22 @@ const CHECKPOINTED_EVENT = parseAbiItem('event Checkpointed(uint64 indexed round
 const CLAIMED_LOOT_EVENT = parseAbiItem('event ClaimedLOOT(address indexed user, uint256 minedLoot, uint256 forgedLoot, uint256 fee, uint256 net)')
 
 type DeploymentLog = Log<bigint, number, false, typeof DEPLOYED_EVENT> | Log<bigint, number, false, typeof DEPLOYED_FOR_EVENT>
+type CurrentRoundBlockState = {
+  id: number
+  deployed: bigint
+  minerCount: number
+}
+type CurrentRoundCache = {
+  roundId: bigint
+  lastScannedBlock: bigint
+  blocks: CurrentRoundBlockState[]
+}
 
 const blockTimestampCache = new Map<string, number>()
 const LOG_BLOCK_RANGE = 45_000n
 let scanStartBlockPromise: Promise<bigint> | null = null
 let protocolStatusCache: { value: Promise<{ gameStarted: boolean; currentRoundId: bigint }>; expiresAt: number } | null = null
+let currentRoundCache: CurrentRoundCache | null = null
 
 function normalizeAddress(value: unknown): Address {
   if (typeof value !== 'string') {
@@ -269,6 +280,77 @@ async function getRoundDeployLogs(roundId: bigint) {
   return [...direct, ...delegated].sort(compareLogsAsc) as DeploymentLog[]
 }
 
+function emptyCurrentRoundBlocks() {
+  return Array.from({ length: PROTOCOL_CONSTANTS.gridSize }, (_, id) => ({
+    id,
+    deployed: 0n,
+    minerCount: 0,
+  }))
+}
+
+function applyDeploymentLogToBlocks(blocks: CurrentRoundBlockState[], log: DeploymentLog) {
+  const amountPerBlock = toBigInt(log.args.amountPerBlock)
+  const blockIds = decodeBlockMask(toBigInt(log.args.blockMask))
+
+  for (const blockId of blockIds) {
+    const block = blocks[blockId]
+    if (!block) continue
+    block.deployed += amountPerBlock
+    block.minerCount += 1
+  }
+}
+
+function formatCurrentRoundBlocks(blocks: CurrentRoundBlockState[]) {
+  return blocks.map((block) => ({
+    id: block.id,
+    deployed: block.deployed.toString(),
+    deployedFormatted: etherString(block.deployed),
+    minerCount: block.minerCount,
+  }))
+}
+
+async function getCurrentRoundBlocks(roundId: bigint) {
+  const latestBlock = await publicClient.getBlockNumber()
+  const bootstrapLookback = 300n
+
+  if (!currentRoundCache || currentRoundCache.roundId !== roundId) {
+    const fromBlock = latestBlock > bootstrapLookback ? latestBlock - bootstrapLookback : 0n
+    currentRoundCache = {
+      roundId,
+      lastScannedBlock: fromBlock > 0n ? fromBlock - 1n : 0n,
+      blocks: emptyCurrentRoundBlocks(),
+    }
+  }
+
+  const fromBlock = currentRoundCache.lastScannedBlock + 1n
+  if (fromBlock <= latestBlock) {
+    const [direct, delegated] = await Promise.all([
+      getLogsPaged({
+        address: CONTRACTS.gridMining,
+        event: DEPLOYED_EVENT,
+        args: { roundId },
+        fromBlock,
+        toBlock: latestBlock,
+      }),
+      getLogsPaged({
+        address: CONTRACTS.gridMining,
+        event: DEPLOYED_FOR_EVENT,
+        args: { roundId },
+        fromBlock,
+        toBlock: latestBlock,
+      }),
+    ])
+
+    for (const log of [...direct, ...delegated].sort(compareLogsAsc) as DeploymentLog[]) {
+      applyDeploymentLogToBlocks(currentRoundCache.blocks, log)
+    }
+
+    currentRoundCache.lastScannedBlock = latestBlock
+  }
+
+  return formatCurrentRoundBlocks(currentRoundCache.blocks)
+}
+
 function buildBlockStats(deployLogs: DeploymentLog[]) {
   const blocks = Array.from({ length: PROTOCOL_CONSTANTS.gridSize }, (_, id) => ({
     id,
@@ -334,8 +416,7 @@ export async function getCurrentRound(user?: string) {
     }
   }
 
-  const deployLogs = await getRoundDeployLogs(roundId)
-  const blocks = buildBlockStats(deployLogs)
+  const blocks = await getCurrentRoundBlocks(roundId)
 
   let userDeployed = 0n
   if (user && isAddress(user)) {
