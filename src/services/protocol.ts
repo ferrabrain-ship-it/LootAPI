@@ -1,5 +1,5 @@
 import type { AbiEvent, Address, Log } from 'viem'
-import { formatEther, getAddress, isAddress, parseAbiItem } from 'viem'
+import { formatEther, getAddress, isAddress, parseAbi, parseAbiItem } from 'viem'
 import lootAbi from '../abis/Loot.json' with { type: 'json' }
 import gridMiningAbi from '../abis/GridMining.json' with { type: 'json' }
 import treasuryAbi from '../abis/Treasury.json' with { type: 'json' }
@@ -29,8 +29,36 @@ const STAKE_WITHDRAW_EVENT = parseAbiItem('event Withdrawn(address indexed user,
 const YIELD_DISTRIBUTED_EVENT = parseAbiItem('event YieldDistributed(uint256 amount, uint256 newAccYieldPerShare)')
 const CHECKPOINTED_EVENT = parseAbiItem('event Checkpointed(uint64 indexed roundId, address indexed user, uint256 ethReward, uint256 lootReward)')
 const CLAIMED_LOOT_EVENT = parseAbiItem('event ClaimedLOOT(address indexed user, uint256 minedLoot, uint256 forgedLoot, uint256 fee, uint256 net)')
+const LOCK_REWARD_NOTIFIED_EVENT = parseAbiItem(
+  'event RewardNotified(uint256 amount, uint256 distributedAmount, uint256 unallocatedAmount, uint256 accRewardPerWeight)'
+)
+const LOCKED_EVENT = parseAbiItem(
+  'event Locked(address indexed user, uint256 indexed lockId, uint256 amount, uint8 durationId, uint256 unlockTime, uint256 newUserWeight, uint256 newTotalWeight)'
+)
+const ADDED_TO_LOCK_EVENT = parseAbiItem(
+  'event AddedToLock(address indexed user, uint256 indexed lockId, uint256 amountAdded, uint256 newAmount, uint256 newUnlockTime, uint256 newUserWeight, uint256 newTotalWeight)'
+)
+const EXTENDED_LOCK_EVENT = parseAbiItem(
+  'event Extended(address indexed user, uint256 indexed lockId, uint8 oldDurationId, uint8 newDurationId, uint256 newUnlockTime, uint256 newUserWeight, uint256 newTotalWeight)'
+)
+const UNLOCKED_EVENT = parseAbiItem(
+  'event Unlocked(address indexed user, uint256 indexed lockId, uint256 amount, uint256 newUserWeight, uint256 newTotalWeight)'
+)
+const LOOT_LOCKER_READ_ABI = parseAbi([
+  'function totalLocked() view returns (uint256)',
+  'function totalWeight() view returns (uint256)',
+])
+const LOCKER_REWARDS_READ_ABI = parseAbi([
+  'function totalNotified() view returns (uint256)',
+  'function totalClaimed() view returns (uint256)',
+])
 
 type DeploymentLog = Log<bigint, number, false, typeof DEPLOYED_EVENT> | Log<bigint, number, false, typeof DEPLOYED_FOR_EVENT>
+type LockerStateLog =
+  | Log<bigint, number, false, typeof LOCKED_EVENT>
+  | Log<bigint, number, false, typeof ADDED_TO_LOCK_EVENT>
+  | Log<bigint, number, false, typeof EXTENDED_LOCK_EVENT>
+  | Log<bigint, number, false, typeof UNLOCKED_EVENT>
 type CurrentRoundBlockState = {
   id: number
   deployed: bigint
@@ -41,11 +69,18 @@ type CurrentRoundCache = {
   lastScannedBlock: bigint
   blocks: CurrentRoundBlockState[]
 }
+type LockerSnapshot = {
+  userLocked: Map<string, bigint>
+  userWeight: Map<string, bigint>
+}
 
 const blockTimestampCache = new Map<string, number>()
 const LOG_BLOCK_RANGE = 45_000n
 const MIN_LOG_BLOCK_RANGE = 1_000n
 const GLOBAL_LOG_CACHE_TTL_MS = 15_000
+const RPC_RETRY_ATTEMPTS = 3
+const USER_HISTORY_MAX_LIMIT = 200
+const USER_HISTORY_CONCURRENCY = 8
 let scanStartBlockPromise: Promise<bigint> | null = null
 let protocolStatusCache: { value: Promise<{ gameStarted: boolean; currentRoundId: bigint }>; expiresAt: number } | null = null
 let currentRoundCache: CurrentRoundCache | null = null
@@ -132,6 +167,8 @@ async function getScanStartBlock() {
       findContractDeploymentBlock(CONTRACTS.treasury),
       findContractDeploymentBlock(CONTRACTS.staking),
       findContractDeploymentBlock(CONTRACTS.autoMiner),
+      findContractDeploymentBlock(CONTRACTS.lootLocker),
+      findContractDeploymentBlock(CONTRACTS.lockerRewards),
     ]).then((blocks) => {
       const earliest = blocks.reduce((min, block) => block < min ? block : min, blocks[0])
       return earliest > 100n ? earliest - 100n : 0n
@@ -139,6 +176,58 @@ async function getScanStartBlock() {
   }
 
   return scanStartBlockPromise
+}
+
+function isRangeLimitErrorMessage(message: string) {
+  return (
+    message.includes('eth_getLogs is limited to a 10,000 range') ||
+    message.includes('limited to a 10000 range') ||
+    message.includes('limited to 0 - 10000 blocks range') ||
+    message.includes('query returned more than') ||
+    message.includes('block range is too wide') ||
+    message.includes('range limit')
+  )
+}
+
+function isRetryableRpcErrorMessage(message: string) {
+  const m = message.toLowerCase()
+  return (
+    m.includes('fetch failed') ||
+    m.includes('timeout') ||
+    m.includes('timed out') ||
+    m.includes('socket hang up') ||
+    m.includes('econnreset') ||
+    m.includes('etimedout') ||
+    m.includes('429') ||
+    m.includes('rate limit') ||
+    m.includes('gateway timeout')
+  )
+}
+
+async function sleep(ms: number) {
+  await new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  mapper: (item: T, index: number) => Promise<R>
+): Promise<R[]> {
+  if (items.length === 0) return []
+  const safeConcurrency = Math.max(1, Math.min(concurrency, items.length))
+  const results = new Array<R>(items.length)
+  let nextIndex = 0
+
+  const workers = Array.from({ length: safeConcurrency }, async () => {
+    while (nextIndex < items.length) {
+      const current = nextIndex
+      nextIndex += 1
+      results[current] = await mapper(items[current], current)
+    }
+  })
+
+  await Promise.all(workers)
+  return results
 }
 
 async function getLogsPaged<TEvent extends AbiEvent | undefined>(
@@ -171,13 +260,36 @@ async function getLogsPaged<TEvent extends AbiEvent | undefined>(
       : cursor + blockRange - 1n
 
     try {
-      const logs = await publicClient.getLogs({
-        address: params.address,
-        event: params.event as never,
-        args: params.args as never,
-        fromBlock: cursor,
-        toBlock: endBlock,
-      }) as Log<bigint, number, false, TEvent>[]
+      let logs: Log<bigint, number, false, TEvent>[] | null = null
+
+      for (let attempt = 0; attempt < RPC_RETRY_ATTEMPTS; attempt++) {
+        try {
+          logs = await publicClient.getLogs({
+            address: params.address,
+            event: params.event as never,
+            args: params.args as never,
+            fromBlock: cursor,
+            toBlock: endBlock,
+          }) as Log<bigint, number, false, TEvent>[]
+          break
+        } catch (rpcError) {
+          const rpcMessage = rpcError instanceof Error ? rpcError.message : String(rpcError)
+          const isRangeLimitError = isRangeLimitErrorMessage(rpcMessage)
+          const isRetryableRpcError = isRetryableRpcErrorMessage(rpcMessage)
+          const isLastAttempt = attempt >= RPC_RETRY_ATTEMPTS - 1
+
+          if (isRangeLimitError || !isRetryableRpcError || isLastAttempt) {
+            throw rpcError
+          }
+
+          await sleep(120 * (attempt + 1))
+        }
+      }
+
+      if (!logs) {
+        throw new Error('Failed to fetch logs after retries')
+      }
+
       chunks.push(...logs)
       cursor = endBlock + 1n
       if (blockRange < LOG_BLOCK_RANGE) {
@@ -185,12 +297,7 @@ async function getLogsPaged<TEvent extends AbiEvent | undefined>(
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
-      const isRangeLimitError =
-        message.includes('eth_getLogs is limited to a 10,000 range') ||
-        message.includes('limited to a 10000 range') ||
-        message.includes('query returned more than') ||
-        message.includes('block range is too wide') ||
-        message.includes('range limit')
+      const isRangeLimitError = isRangeLimitErrorMessage(message)
 
       if (!isRangeLimitError || blockRange <= MIN_LOG_BLOCK_RANGE) {
         throw error
@@ -444,6 +551,98 @@ async function getCheckpointLogs() {
     event: CHECKPOINTED_EVENT,
     fromBlock: env.scanStartBlock,
     toBlock: 'latest',
+  })
+}
+
+async function getLockerStateLogs() {
+  return withCache('logs:locker:state', 60_000, async () => {
+    const [locked, added, extended, unlocked] = await Promise.all([
+      getCachedLogsPaged('locker:locked', 60_000, {
+        address: CONTRACTS.lootLocker,
+        event: LOCKED_EVENT,
+        fromBlock: env.scanStartBlock,
+        toBlock: 'latest',
+      }),
+      getCachedLogsPaged('locker:added', 60_000, {
+        address: CONTRACTS.lootLocker,
+        event: ADDED_TO_LOCK_EVENT,
+        fromBlock: env.scanStartBlock,
+        toBlock: 'latest',
+      }),
+      getCachedLogsPaged('locker:extended', 60_000, {
+        address: CONTRACTS.lootLocker,
+        event: EXTENDED_LOCK_EVENT,
+        fromBlock: env.scanStartBlock,
+        toBlock: 'latest',
+      }),
+      getCachedLogsPaged('locker:unlocked', 60_000, {
+        address: CONTRACTS.lootLocker,
+        event: UNLOCKED_EVENT,
+        fromBlock: env.scanStartBlock,
+        toBlock: 'latest',
+      }),
+    ])
+
+    return [...locked, ...added, ...extended, ...unlocked].sort(compareLogsAsc) as LockerStateLog[]
+  })
+}
+
+async function getLockRewardNotifiedLogs() {
+  return getCachedLogsPaged('locker-rewards:notified', 30_000, {
+    address: CONTRACTS.lockerRewards,
+    event: LOCK_REWARD_NOTIFIED_EVENT,
+    fromBlock: env.scanStartBlock,
+    toBlock: 'latest',
+  })
+}
+
+async function getLockerSnapshot() {
+  return withCache('locker:snapshot', 60_000, async (): Promise<LockerSnapshot> => {
+    const logs = await getLockerStateLogs()
+    const lockOwners = new Map<bigint, string>()
+    const lockAmounts = new Map<bigint, bigint>()
+    const userWeight = new Map<string, bigint>()
+
+    for (const log of logs) {
+      const user = normalizeAddress(log.args.user)
+      const lockId = toBigInt(log.args.lockId)
+      const eventName = log.eventName
+
+      if (eventName === 'Locked') {
+        lockOwners.set(lockId, user)
+        lockAmounts.set(lockId, toBigInt(log.args.amount))
+        userWeight.set(user, toBigInt(log.args.newUserWeight))
+        continue
+      }
+
+      if (eventName === 'AddedToLock') {
+        lockOwners.set(lockId, user)
+        lockAmounts.set(lockId, toBigInt(log.args.newAmount))
+        userWeight.set(user, toBigInt(log.args.newUserWeight))
+        continue
+      }
+
+      if (eventName === 'Extended') {
+        userWeight.set(user, toBigInt(log.args.newUserWeight))
+        continue
+      }
+
+      if (eventName === 'Unlocked') {
+        lockOwners.set(lockId, user)
+        lockAmounts.set(lockId, 0n)
+        userWeight.set(user, toBigInt(log.args.newUserWeight))
+      }
+    }
+
+    const userLocked = new Map<string, bigint>()
+    for (const [lockId, amount] of lockAmounts.entries()) {
+      if (amount <= 0n) continue
+      const owner = lockOwners.get(lockId)
+      if (!owner) continue
+      userLocked.set(owner, (userLocked.get(owner) ?? 0n) + amount)
+    }
+
+    return { userLocked, userWeight }
   })
 }
 
@@ -1130,6 +1329,7 @@ export async function getAutoMine(address: Address) {
 export async function getUserHistory(address: Address, limit = 100, roundIdFilter?: bigint) {
   const roundKey = roundIdFilter ? roundIdFilter.toString() : 'all'
   return withCache(`user-history:${address}:${limit}:${roundKey}`, 30_000, async () => {
+    const safeLimit = Math.max(1, Math.min(limit, USER_HISTORY_MAX_LIMIT))
     const status = await getProtocolStatus()
     if (!status.gameStarted || status.currentRoundId === 0n) {
       return {
@@ -1150,9 +1350,9 @@ export async function getUserHistory(address: Address, limit = 100, roundIdFilte
       .sort((a, b) =>
       compareLogsDesc(a, b)
     )
-      .slice(0, limit)
+      .slice(0, safeLimit)
 
-    const history = await Promise.all(ordered.map(async (log) => {
+    const history = await mapWithConcurrency(ordered, USER_HISTORY_CONCURRENCY, async (log) => {
       const roundId = toBigInt(log.args.roundId)
       const round = await getRound(roundId)
       const miners = await getRoundMiners(roundId)
@@ -1184,7 +1384,7 @@ export async function getUserHistory(address: Address, limit = 100, roundIdFilte
           pnl: pnl.toString(),
         },
       }
-    }))
+    })
 
     const totals = history.reduce((acc, entry) => {
       acc.totalETHWon += BigInt(entry.roundResult.ethWon)
@@ -1212,6 +1412,133 @@ export async function getUserHistory(address: Address, limit = 100, roundIdFilte
         roundsWon: totals.roundsWon,
       },
     }
+  })
+}
+
+export async function getLockStats() {
+  return withCache('lock-stats', 15_000, async () => {
+    const [totalLockedResult, totalWeightResult, totalNotifiedResult, totalClaimedResult, snapshotResult] = await Promise.allSettled([
+      publicClient.readContract({
+        address: CONTRACTS.lootLocker,
+        abi: LOOT_LOCKER_READ_ABI,
+        functionName: 'totalLocked',
+      }) as Promise<bigint>,
+      publicClient.readContract({
+        address: CONTRACTS.lootLocker,
+        abi: LOOT_LOCKER_READ_ABI,
+        functionName: 'totalWeight',
+      }) as Promise<bigint>,
+      publicClient.readContract({
+        address: CONTRACTS.lockerRewards,
+        abi: LOCKER_REWARDS_READ_ABI,
+        functionName: 'totalNotified',
+      }) as Promise<bigint>,
+      publicClient.readContract({
+        address: CONTRACTS.lockerRewards,
+        abi: LOCKER_REWARDS_READ_ABI,
+        functionName: 'totalClaimed',
+      }) as Promise<bigint>,
+      getLockerSnapshot(),
+    ])
+
+    const totalLocked = totalLockedResult.status === 'fulfilled' ? totalLockedResult.value : 0n
+    const totalWeight = totalWeightResult.status === 'fulfilled' ? totalWeightResult.value : 0n
+    const totalNotified = totalNotifiedResult.status === 'fulfilled' ? totalNotifiedResult.value : 0n
+    const totalClaimed = totalClaimedResult.status === 'fulfilled' ? totalClaimedResult.value : 0n
+    const snapshot = snapshotResult.status === 'fulfilled'
+      ? snapshotResult.value
+      : { userLocked: new Map<string, bigint>(), userWeight: new Map<string, bigint>() }
+
+    const lockers = [...snapshot.userLocked.entries()].filter(([, locked]) => locked > 0n).length
+
+    return {
+      protocolLocked: totalLocked.toString(),
+      protocolLockedFormatted: etherString(totalLocked),
+      protocolWeight: totalWeight.toString(),
+      protocolWeightFormatted: etherString(totalWeight),
+      totalNotified: totalNotified.toString(),
+      totalNotifiedFormatted: etherString(totalNotified),
+      totalClaimed: totalClaimed.toString(),
+      totalClaimedFormatted: etherString(totalClaimed),
+      lockers,
+    }
+  })
+}
+
+export async function getLockDistributions(page = 1, limit = 12) {
+  return withCache(`lock-distributions:${page}:${limit}`, 15_000, async () => {
+    const safePage = Number.isFinite(page) ? Math.max(1, Math.floor(page)) : 1
+    const safeLimit = Number.isFinite(limit) ? Math.max(1, Math.min(Math.floor(limit), 100)) : 12
+
+    const [logs, snapshot] = await Promise.all([
+      getLockRewardNotifiedLogs(),
+      getLockerSnapshot(),
+    ])
+
+    const ordered = [...logs].sort(compareLogsDesc)
+    const total = ordered.length
+    const pages = Math.max(1, Math.ceil(total / safeLimit))
+    const slice = ordered.slice((safePage - 1) * safeLimit, safePage * safeLimit)
+
+    const lockers = [...snapshot.userLocked.values()].filter((locked) => locked > 0n).length
+    const lockedSupply = [...snapshot.userLocked.values()].reduce((sum, locked) => sum + locked, 0n)
+
+    const distributions = await Promise.all(
+      slice.map(async (log) => {
+        const timestampMs = await getBlockTimestampMs(getLogBlockNumber(log))
+        const amount = toBigInt(log.args.amount)
+        const distributedAmount = toBigInt(log.args.distributedAmount)
+        const unallocatedAmount = toBigInt(log.args.unallocatedAmount)
+
+        return {
+          time: relativeTime(timestampMs),
+          timestamp: new Date(timestampMs).toISOString(),
+          amount: amount.toString(),
+          amountFormatted: etherString(amount),
+          ethDistributed: distributedAmount.toString(),
+          ethDistributedFormatted: etherString(distributedAmount),
+          unallocatedAmount: unallocatedAmount.toString(),
+          unallocatedAmountFormatted: etherString(unallocatedAmount),
+          lockers,
+          lockedSupply: lockedSupply.toString(),
+          lockedSupplyFormatted: etherString(lockedSupply),
+          txHash: log.transactionHash,
+          blockNumber: Number(getLogBlockNumber(log)),
+        }
+      })
+    )
+
+    return {
+      distributions,
+      pagination: {
+        page: safePage,
+        limit: safeLimit,
+        total,
+        pages,
+      },
+    }
+  })
+}
+
+export async function getLeaderboardLockers(limit = 12) {
+  return withCache(`leaderboard-lockers:${limit}`, 30_000, async () => {
+    const snapshot = await getLockerSnapshot()
+    const lockers = [...snapshot.userLocked.entries()]
+      .filter(([, locked]) => locked > 0n)
+      .sort((a, b) => (b[1] > a[1] ? 1 : -1))
+      .slice(0, limit)
+      .map(([address, locked]) => {
+        const weight = snapshot.userWeight.get(address) ?? 0n
+        return {
+          address,
+          locked: locked.toString(),
+          lockedFormatted: etherString(locked),
+          weight: weight.toString(),
+          weightFormatted: etherString(weight),
+        }
+      })
+
+    return { lockers }
   })
 }
 

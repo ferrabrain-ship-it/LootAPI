@@ -7,10 +7,13 @@ import {
   getAutoMine,
   getBuybacks,
   getCurrentRound,
+  getLockDistributions,
   getLatestRoundTransition,
   getLeaderboardEarners,
+  getLeaderboardLockers,
   getLeaderboardMiners,
   getLeaderboardStakers,
+  getLockStats,
   getRound,
   getRoundMiners,
   getRounds,
@@ -41,6 +44,11 @@ app.get('/api/price', async () => {
 
 app.get('/api/stats', async () => getStats())
 app.get('/api/treasury/stats', async () => getTreasuryStats())
+app.get('/api/lock/stats', async () => getLockStats())
+app.get('/api/lock/distributions', async (req) => {
+  const { page = '1', limit = '12' } = req.query as Record<string, string | undefined>
+  return getLockDistributions(Number(page), Number(limit))
+})
 
 app.get('/api/treasury/buybacks', async (req) => {
   const { page = '1', limit = '12' } = req.query as Record<string, string | undefined>
@@ -90,7 +98,9 @@ app.get('/api/user/:address/history', async (req) => {
   if (type !== 'deploy') {
     return { history: [], totals: null }
   }
-  return getUserHistory(asAddress(address), Number(limit), roundId ? BigInt(roundId) : undefined)
+  const parsedLimit = Number(limit)
+  const safeLimit = Number.isFinite(parsedLimit) ? Math.max(1, Math.min(parsedLimit, 200)) : 100
+  return getUserHistory(asAddress(address), safeLimit, roundId ? BigInt(roundId) : undefined)
 })
 
 app.get('/api/user/:address/profile', async (req) => {
@@ -121,6 +131,11 @@ app.get('/api/leaderboard/stakers', async (req) => {
 app.get('/api/leaderboard/earners', async (req) => {
   const { limit = '12' } = req.query as { limit?: string }
   return getLeaderboardEarners(Number(limit))
+})
+
+app.get('/api/leaderboard/lockers', async (req) => {
+  const { limit = '12' } = req.query as { limit?: string }
+  return getLeaderboardLockers(Number(limit))
 })
 
 function startSse(reply: FastifyReply) {
