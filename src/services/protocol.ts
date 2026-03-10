@@ -44,6 +44,8 @@ type CurrentRoundCache = {
 
 const blockTimestampCache = new Map<string, number>()
 const LOG_BLOCK_RANGE = 45_000n
+const MIN_LOG_BLOCK_RANGE = 1_000n
+const GLOBAL_LOG_CACHE_TTL_MS = 15_000
 let scanStartBlockPromise: Promise<bigint> | null = null
 let protocolStatusCache: { value: Promise<{ gameStarted: boolean; currentRoundId: bigint }>; expiresAt: number } | null = null
 let currentRoundCache: CurrentRoundCache | null = null
@@ -161,24 +163,61 @@ async function getLogsPaged<TEvent extends AbiEvent | undefined>(
 
   const chunks: Log<bigint, number, false, TEvent>[] = []
   let cursor = startBlock
+  let blockRange = LOG_BLOCK_RANGE
 
   while (cursor <= latestBlock) {
-    const endBlock = cursor + LOG_BLOCK_RANGE - 1n > latestBlock
+    const endBlock = cursor + blockRange - 1n > latestBlock
       ? latestBlock
-      : cursor + LOG_BLOCK_RANGE - 1n
+      : cursor + blockRange - 1n
 
-    const logs = await publicClient.getLogs({
-      address: params.address,
-      event: params.event as never,
-      args: params.args as never,
-      fromBlock: cursor,
-      toBlock: endBlock,
-    }) as Log<bigint, number, false, TEvent>[]
-    chunks.push(...logs)
-    cursor = endBlock + 1n
+    try {
+      const logs = await publicClient.getLogs({
+        address: params.address,
+        event: params.event as never,
+        args: params.args as never,
+        fromBlock: cursor,
+        toBlock: endBlock,
+      }) as Log<bigint, number, false, TEvent>[]
+      chunks.push(...logs)
+      cursor = endBlock + 1n
+      if (blockRange < LOG_BLOCK_RANGE) {
+        blockRange = LOG_BLOCK_RANGE
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      const isRangeLimitError =
+        message.includes('eth_getLogs is limited to a 10,000 range') ||
+        message.includes('limited to a 10000 range') ||
+        message.includes('query returned more than') ||
+        message.includes('block range is too wide') ||
+        message.includes('range limit')
+
+      if (!isRangeLimitError || blockRange <= MIN_LOG_BLOCK_RANGE) {
+        throw error
+      }
+
+      blockRange = blockRange / 2n
+      if (blockRange < MIN_LOG_BLOCK_RANGE) {
+        blockRange = MIN_LOG_BLOCK_RANGE
+      }
+    }
   }
 
   return chunks
+}
+
+async function getCachedLogsPaged<TEvent extends AbiEvent | undefined>(
+  key: string,
+  ttlMs: number,
+  params: {
+    address: Address
+    event: TEvent
+    args?: Record<string, unknown>
+    fromBlock?: bigint
+    toBlock?: bigint | 'latest'
+  }
+) {
+  return withCache(`logs:${key}`, ttlMs, () => getLogsPaged(params))
 }
 
 function getLogBlockNumber(log: { blockNumber: bigint | null }): bigint {
@@ -249,6 +288,12 @@ async function getProtocolStatus() {
   return value
 }
 
+async function isRecentRound(roundId: bigint) {
+  const status = await getProtocolStatus()
+  if (!status.gameStarted || status.currentRoundId === 0n) return false
+  return roundId >= (status.currentRoundId > 2n ? status.currentRoundId - 2n : 0n)
+}
+
 export async function getLootPrice() {
   try {
     const res = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${CONTRACTS.loot}`, { cache: 'no-store' })
@@ -292,24 +337,93 @@ export async function getStats() {
 }
 
 async function getRoundDeployLogs(roundId: bigint) {
-  return withCache(`round-deploy-logs:${roundId.toString()}`, 5 * 60_000, async () => {
+  return withCache(`round-deploy-logs:${roundId.toString()}`, GLOBAL_LOG_CACHE_TTL_MS, async () => {
+    const allDeployments = await getAllDeploymentLogs()
+    return allDeployments.filter((log) => toBigInt(log.args.roundId) === roundId)
+  })
+}
+
+async function getAllDeploymentLogs() {
+  return withCache('logs:grid:deployments', GLOBAL_LOG_CACHE_TTL_MS, async () => {
     const [direct, delegated] = await Promise.all([
-      getLogsPaged({
+      getCachedLogsPaged('grid:deployed', GLOBAL_LOG_CACHE_TTL_MS, {
         address: CONTRACTS.gridMining,
         event: DEPLOYED_EVENT,
-        args: { roundId },
         fromBlock: env.scanStartBlock,
         toBlock: 'latest',
       }),
-      getLogsPaged({
+      getCachedLogsPaged('grid:deployed-for', GLOBAL_LOG_CACHE_TTL_MS, {
         address: CONTRACTS.gridMining,
         event: DEPLOYED_FOR_EVENT,
-        args: { roundId },
         fromBlock: env.scanStartBlock,
         toBlock: 'latest',
       }),
     ])
+
     return [...direct, ...delegated].sort(compareLogsAsc) as DeploymentLog[]
+  })
+}
+
+async function getRoundSettledLogs() {
+  return getCachedLogsPaged('grid:round-settled', GLOBAL_LOG_CACHE_TTL_MS, {
+    address: CONTRACTS.gridMining,
+    event: ROUND_SETTLED_EVENT,
+    fromBlock: env.scanStartBlock,
+    toBlock: 'latest',
+  })
+}
+
+async function getVaultLogs() {
+  return getCachedLogsPaged('treasury:vault', GLOBAL_LOG_CACHE_TTL_MS, {
+    address: CONTRACTS.treasury,
+    event: VAULT_EVENT,
+    fromBlock: env.scanStartBlock,
+    toBlock: 'latest',
+  })
+}
+
+async function getBuybackLogs() {
+  return getCachedLogsPaged('treasury:buybacks', GLOBAL_LOG_CACHE_TTL_MS, {
+    address: CONTRACTS.treasury,
+    event: BUYBACK_EVENT,
+    fromBlock: env.scanStartBlock,
+    toBlock: 'latest',
+  })
+}
+
+async function getStakeDepositLogs() {
+  return getCachedLogsPaged('staking:deposits', GLOBAL_LOG_CACHE_TTL_MS, {
+    address: CONTRACTS.staking,
+    event: STAKE_DEPOSIT_EVENT,
+    fromBlock: env.scanStartBlock,
+    toBlock: 'latest',
+  })
+}
+
+async function getStakeWithdrawLogs() {
+  return getCachedLogsPaged('staking:withdrawals', GLOBAL_LOG_CACHE_TTL_MS, {
+    address: CONTRACTS.staking,
+    event: STAKE_WITHDRAW_EVENT,
+    fromBlock: env.scanStartBlock,
+    toBlock: 'latest',
+  })
+}
+
+async function getYieldDistributedLogs() {
+  return getCachedLogsPaged('staking:yield-distributed', GLOBAL_LOG_CACHE_TTL_MS, {
+    address: CONTRACTS.staking,
+    event: YIELD_DISTRIBUTED_EVENT,
+    fromBlock: env.scanStartBlock,
+    toBlock: 'latest',
+  })
+}
+
+async function getCheckpointLogs() {
+  return getCachedLogsPaged('grid:checkpointed', GLOBAL_LOG_CACHE_TTL_MS, {
+    address: CONTRACTS.gridMining,
+    event: CHECKPOINTED_EVENT,
+    fromBlock: env.scanStartBlock,
+    toBlock: 'latest',
   })
 }
 
@@ -527,7 +641,7 @@ async function resolveRoundWinnerAddress(roundId: bigint, roundState: Awaited<Re
 }
 
 async function getRoundState(roundId: bigint) {
-  return withCache(`round-state:${roundId.toString()}`, 5 * 60_000, async () => {
+  const load = async () => {
     const [
       roundStruct,
       roundView,
@@ -545,13 +659,7 @@ async function getRoundState(roundId: bigint) {
         functionName: 'getRound',
         args: [roundId],
       }) as Promise<[bigint, bigint, bigint, bigint, number, Address, bigint, bigint, boolean]>,
-      getLogsPaged({
-        address: CONTRACTS.gridMining,
-        event: ROUND_SETTLED_EVENT,
-        args: { roundId },
-        fromBlock: env.scanStartBlock,
-        toBlock: 'latest',
-      }).then((logs) => logs.at(-1) ?? null),
+      getRoundSettledLogs().then((logs) => logs.filter((log) => toBigInt(log.args.roundId) === roundId).at(-1) ?? null),
     ])
 
     return {
@@ -572,16 +680,46 @@ async function getRoundState(roundId: bigint) {
       roundView,
       isSplit: settledLog?.args.isSplit ?? roundStruct[6] === '0x0000000000000000000000000000000000000000',
     }
-  })
+  }
+
+  if (await isRecentRound(roundId)) {
+    return load()
+  }
+
+  return withCache(`round-state:${roundId.toString()}`, 5 * 60_000, load)
 }
 
 export async function getRound(roundIdInput: string | number | bigint) {
   const roundId = BigInt(roundIdInput)
-  return withCache(`round:${roundId.toString()}`, 5 * 60_000, async () => {
-    const [roundState, deployLogs] = await Promise.all([
-      getRoundState(roundId),
-      getRoundDeployLogs(roundId),
-    ])
+  const load = async () => {
+    const roundState = await getRoundState(roundId)
+
+    if (roundState.totalDeployed === 0n || roundState.winnersDeployed === 0n) {
+      const vaultedAmount = computeVaultedAmount(roundState.totalDeployed, roundState.winnersDeployed, roundState.totalWinnings)
+      const settledAtMs = roundState.settledLog?.blockNumber ? await getBlockTimestampMs(roundState.settledLog.blockNumber) : Number(roundState.endTime) * 1000
+
+      return {
+        roundId: Number(roundId),
+        winningBlock: Number(roundState.winningBlock),
+        topMiner: null,
+        isSplit: roundState.isSplit,
+        winnerCount: 0,
+        totalDeployed: roundState.totalDeployed.toString(),
+        totalDeployedFormatted: etherString(roundState.totalDeployed),
+        vaultedAmount: vaultedAmount.toString(),
+        vaultedAmountFormatted: etherString(vaultedAmount),
+        totalWinnings: roundState.totalWinnings.toString(),
+        totalWinningsFormatted: etherString(roundState.totalWinnings),
+        lootpotAmount: roundState.lootpotAmount.toString(),
+        lootpotAmountFormatted: etherString(roundState.lootpotAmount),
+        startTime: Number(roundState.startTime),
+        endTime: Number(roundState.endTime),
+        settledAt: new Date(settledAtMs).toISOString(),
+        txHash: roundState.settledLog?.transactionHash ?? null,
+      }
+    }
+
+    const deployLogs = await getRoundDeployLogs(roundId)
 
     const winnerAddress = await resolveRoundWinnerAddress(roundId, roundState, deployLogs)
     const winnerCount = deployLogs
@@ -611,16 +749,29 @@ export async function getRound(roundIdInput: string | number | bigint) {
       settledAt: new Date(settledAtMs).toISOString(),
       txHash: roundState.settledLog?.transactionHash ?? null,
     }
-  })
+  }
+
+  if (await isRecentRound(roundId)) {
+    return load()
+  }
+
+  return withCache(`round:${roundId.toString()}`, 5 * 60_000, load)
 }
 
 export async function getRoundMiners(roundIdInput: string | number | bigint) {
   const roundId = BigInt(roundIdInput)
   return withCache(`round-miners:${roundId.toString()}`, 5 * 60_000, async () => {
-    const [roundState, deployLogs] = await Promise.all([
-      getRoundState(roundId),
-      getRoundDeployLogs(roundId),
-    ])
+    const roundState = await getRoundState(roundId)
+
+    if (roundState.totalDeployed === 0n || roundState.winnersDeployed === 0n) {
+      return {
+        roundId: Number(roundId),
+        winningBlock: Number(roundState.winningBlock),
+        miners: [],
+      }
+    }
+
+    const deployLogs = await getRoundDeployLogs(roundId)
 
     const mapped = deployLogs.map(mapDeployment)
     const winners = mapped.filter((log) => decodeBlockMask(log.blockMask).includes(Number(roundState.winningBlock)))
@@ -677,12 +828,7 @@ export async function getRounds(page = 1, limit = 12, lootpotOnly = false) {
       }
     }
 
-    const logs = await getLogsPaged({
-      address: CONTRACTS.gridMining,
-      event: ROUND_SETTLED_EVENT,
-      fromBlock: env.scanStartBlock,
-      toBlock: 'latest',
-    })
+    const logs = await getRoundSettledLogs()
 
     let roundIds = logs.map((log) => Number(log.args.roundId))
     if (lootpotOnly) {
@@ -711,14 +857,7 @@ export async function getTreasuryStats() {
         abi: treasuryAbi,
         functionName: 'getStats',
       }) as Promise<[bigint, bigint, bigint, bigint]>,
-      status.currentRoundId === 0n
-        ? Promise.resolve([])
-        : getLogsPaged({
-        address: CONTRACTS.treasury,
-        event: VAULT_EVENT,
-        fromBlock: env.scanStartBlock,
-        toBlock: 'latest',
-        }),
+      status.currentRoundId === 0n ? Promise.resolve([]) : getVaultLogs(),
     ])
 
     const totalVaultedLifetime = vaultLogs.reduce((sum, log) => sum + toBigInt(log.args.amount), 0n)
@@ -739,12 +878,7 @@ export async function getTreasuryStats() {
 
 export async function getBuybacks(page = 1, limit = 12) {
   return withCache(`buybacks:${page}:${limit}`, 30_000, async () => {
-    const logs = await getLogsPaged({
-      address: CONTRACTS.treasury,
-      event: BUYBACK_EVENT,
-      fromBlock: env.scanStartBlock,
-      toBlock: 'latest',
-    })
+    const logs = await getBuybackLogs()
 
     const ordered = [...logs].sort((a, b) =>
       compareLogsDesc(a, b)
@@ -792,12 +926,7 @@ export async function getStakingStats() {
         args: [CONTRACTS.staking],
       }) as Promise<bigint>,
       getLootPrice(),
-      getLogsPaged({
-        address: CONTRACTS.staking,
-        event: YIELD_DISTRIBUTED_EVENT,
-        fromBlock: env.scanStartBlock,
-        toBlock: 'latest',
-      }),
+      getYieldDistributedLogs(),
     ])
 
     const totalStaked = globalStats[0]
@@ -989,26 +1118,12 @@ export async function getUserHistory(address: Address, limit = 100, roundIdFilte
       }
     }
 
-    const [deploys, delegated] = await Promise.all([
-      getLogsPaged({
-        address: CONTRACTS.gridMining,
-        event: DEPLOYED_EVENT,
-        args: { user: address, ...(roundIdFilter ? { roundId: roundIdFilter } : {}) },
-        fromBlock: env.scanStartBlock,
-        toBlock: 'latest',
-      }),
-      getLogsPaged({
-        address: CONTRACTS.gridMining,
-        event: DEPLOYED_FOR_EVENT,
-        args: { user: address, ...(roundIdFilter ? { roundId: roundIdFilter } : {}) },
-        fromBlock: env.scanStartBlock,
-        toBlock: 'latest',
-      }),
-    ])
-
-    const ordered = [...deploys, ...delegated].sort((a, b) =>
+    const ordered = (await getAllDeploymentLogs())
+      .filter((log) => safeAddressEq(log.args.user, address) && (!roundIdFilter || toBigInt(log.args.roundId) === roundIdFilter))
+      .sort((a, b) =>
       compareLogsDesc(a, b)
-    ).slice(0, limit)
+    )
+      .slice(0, limit)
 
     const history = await Promise.all(ordered.map(async (log) => {
       const roundId = toBigInt(log.args.roundId)
@@ -1080,22 +1195,9 @@ export async function getLeaderboardMiners(limit = 12) {
       return { period: 'all', miners: [], deployers: [] }
     }
 
-    const logs = await Promise.all([
-      getLogsPaged({
-        address: CONTRACTS.gridMining,
-        event: DEPLOYED_EVENT,
-        fromBlock: env.scanStartBlock,
-        toBlock: 'latest',
-      }),
-      getLogsPaged({
-        address: CONTRACTS.gridMining,
-        event: DEPLOYED_FOR_EVENT,
-        fromBlock: env.scanStartBlock,
-        toBlock: 'latest',
-      }),
-    ])
+    const logs = await getAllDeploymentLogs()
     const totals = new Map<string, bigint>()
-    for (const log of [...logs[0], ...logs[1]]) {
+    for (const log of logs) {
       const address = normalizeAddress(log.args.user)
       totals.set(address, (totals.get(address) ?? 0n) + toBigInt(log.args.totalAmount))
     }
@@ -1120,18 +1222,8 @@ export async function getLeaderboardMiners(limit = 12) {
 export async function getLeaderboardStakers(limit = 12) {
   return withCache(`leaderboard-stakers:${limit}`, 30_000, async () => {
     const [deposits, withdrawals] = await Promise.all([
-      getLogsPaged({
-        address: CONTRACTS.staking,
-        event: STAKE_DEPOSIT_EVENT,
-        fromBlock: env.scanStartBlock,
-        toBlock: 'latest',
-      }),
-      getLogsPaged({
-        address: CONTRACTS.staking,
-        event: STAKE_WITHDRAW_EVENT,
-        fromBlock: env.scanStartBlock,
-        toBlock: 'latest',
-      }),
+      getStakeDepositLogs(),
+      getStakeWithdrawLogs(),
     ])
     const balances = new Map<string, bigint>()
     for (const log of deposits) {
@@ -1168,12 +1260,7 @@ export async function getLeaderboardEarners(limit = 12) {
       }
     }
 
-    const checkpointLogs = await getLogsPaged({
-      address: CONTRACTS.gridMining,
-      event: CHECKPOINTED_EVENT,
-      fromBlock: env.scanStartBlock,
-      toBlock: 'latest',
-    })
+    const checkpointLogs = await getCheckpointLogs()
     const users = [...new Set(checkpointLogs.map((log) => normalizeAddress(log.args.user)))]
     const rewards = await Promise.all(users.map(async (address) => ({
       address,
