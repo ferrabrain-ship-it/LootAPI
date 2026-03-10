@@ -373,6 +373,26 @@ async function getRoundSettledLogs() {
   })
 }
 
+async function getRoundSettledLogForRound(roundId: bigint, fresh = false) {
+  const load = async () => {
+    const logs = await getLogsPaged({
+      address: CONTRACTS.gridMining,
+      event: ROUND_SETTLED_EVENT,
+      args: { roundId },
+      fromBlock: env.scanStartBlock,
+      toBlock: 'latest',
+    })
+
+    return logs.at(-1) ?? null
+  }
+
+  if (fresh) {
+    return load()
+  }
+
+  return withCache(`round-settled-log:${roundId.toString()}`, GLOBAL_LOG_CACHE_TTL_MS, load)
+}
+
 async function getVaultLogs() {
   return getCachedLogsPaged('treasury:vault', GLOBAL_LOG_CACHE_TTL_MS, {
     address: CONTRACTS.treasury,
@@ -641,6 +661,7 @@ async function resolveRoundWinnerAddress(roundId: bigint, roundState: Awaited<Re
 }
 
 async function getRoundState(roundId: bigint) {
+  const recent = await isRecentRound(roundId)
   const load = async () => {
     const [
       roundStruct,
@@ -659,7 +680,7 @@ async function getRoundState(roundId: bigint) {
         functionName: 'getRound',
         args: [roundId],
       }) as Promise<[bigint, bigint, bigint, bigint, number, Address, bigint, bigint, boolean]>,
-      getRoundSettledLogs().then((logs) => logs.filter((log) => toBigInt(log.args.roundId) === roundId).at(-1) ?? null),
+      getRoundSettledLogForRound(roundId, recent),
     ])
 
     return {
@@ -682,7 +703,7 @@ async function getRoundState(roundId: bigint) {
     }
   }
 
-  if (await isRecentRound(roundId)) {
+  if (recent) {
     return load()
   }
 
