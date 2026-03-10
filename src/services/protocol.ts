@@ -781,7 +781,7 @@ export async function getRound(roundIdInput: string | number | bigint) {
 
 export async function getRoundMiners(roundIdInput: string | number | bigint) {
   const roundId = BigInt(roundIdInput)
-  return withCache(`round-miners:${roundId.toString()}`, 5 * 60_000, async () => {
+  const load = async () => {
     const roundState = await getRoundState(roundId)
 
     if (roundState.totalDeployed === 0n || roundState.winnersDeployed === 0n) {
@@ -836,7 +836,13 @@ export async function getRoundMiners(roundIdInput: string | number | bigint) {
         }
       }),
     }
-  })
+  }
+
+  if (await isRecentRound(roundId)) {
+    return load()
+  }
+
+  return withCache(`round-miners:${roundId.toString()}`, 5 * 60_000, load)
 }
 
 export async function getRounds(page = 1, limit = 12, lootpotOnly = false) {
