@@ -1214,7 +1214,7 @@ export async function getUserStake(address: Address) {
 }
 
 export async function getUserRewards(address: Address) {
-  return withCache(`user-rewards:${address}`, 10_000, async () => {
+  return withCache(`user-rewards:${address}`, 2_000, async () => {
     const [pending, pendingLoot] = await Promise.all([
       publicClient.readContract({
         address: CONTRACTS.gridMining,
