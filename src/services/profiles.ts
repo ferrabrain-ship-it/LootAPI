@@ -15,6 +15,25 @@ export interface ProfileShape {
   discord: string | null
 }
 
+interface ProfileRow {
+  wallet_address: string
+  username: string | null
+  bio?: string | null
+  pfp_url: string | null
+  banner_url?: string | null
+  discord?: string | null
+}
+
+interface SocialConnectionRow {
+  wallet_address: string
+  twitter_handle: string | null
+  discord_username: string | null
+}
+
+function resolveDisplayName(profile?: Pick<ProfileRow, 'username'> | null, social?: Pick<SocialConnectionRow, 'twitter_handle' | 'discord_username'> | null) {
+  return profile?.username ?? social?.twitter_handle ?? social?.discord_username ?? null
+}
+
 export async function getProfile(address: Address): Promise<ProfileShape> {
   if (!supabase) {
     return {
@@ -27,19 +46,27 @@ export async function getProfile(address: Address): Promise<ProfileShape> {
     }
   }
 
-  const { data } = await supabase
-    .from('profiles')
-    .select('wallet_address,username,bio,pfp_url,banner_url,discord')
-    .eq('wallet_address', address.toLowerCase())
-    .maybeSingle()
+  const lowerAddress = address.toLowerCase()
+  const [{ data: profile }, { data: social }] = await Promise.all([
+    supabase
+      .from('profiles')
+      .select('wallet_address,username,bio,pfp_url,banner_url,discord')
+      .eq('wallet_address', lowerAddress)
+      .maybeSingle<ProfileRow>(),
+    supabase
+      .from('social_connections')
+      .select('wallet_address,twitter_handle,discord_username')
+      .eq('wallet_address', lowerAddress)
+      .maybeSingle<SocialConnectionRow>(),
+  ])
 
   return {
     address,
-    username: data?.username ?? null,
-    bio: data?.bio ?? null,
-    pfpUrl: data?.pfp_url ?? null,
-    bannerUrl: data?.banner_url ?? null,
-    discord: data?.discord ?? null,
+    username: resolveDisplayName(profile, social),
+    bio: profile?.bio ?? null,
+    pfpUrl: profile?.pfp_url ?? null,
+    bannerUrl: profile?.banner_url ?? null,
+    discord: profile?.discord ?? social?.discord_username ?? null,
   }
 }
 
@@ -57,21 +84,39 @@ export async function getProfilesBatch(addresses: Address[]) {
   }
 
   const lower = addresses.map((a) => a.toLowerCase())
-  const { data } = await supabase
-    .from('profiles')
-    .select('wallet_address,username,pfp_url')
-    .in('wallet_address', lower)
+  const [{ data: profilesData }, { data: socialsData }] = await Promise.all([
+    supabase
+      .from('profiles')
+      .select('wallet_address,username,pfp_url')
+      .in('wallet_address', lower)
+      .returns<ProfileRow[]>(),
+    supabase
+      .from('social_connections')
+      .select('wallet_address,twitter_handle,discord_username')
+      .in('wallet_address', lower)
+      .returns<SocialConnectionRow[]>(),
+  ])
 
-  const byAddress = new Map((data ?? []).map((row) => [
+  const profilesByAddress = new Map((profilesData ?? []).map((row) => [
     row.wallet_address.toLowerCase(),
     { address: row.wallet_address, username: row.username ?? null, pfpUrl: row.pfp_url ?? null },
   ]))
+  const socialsByAddress = new Map((socialsData ?? []).map((row) => [
+    row.wallet_address.toLowerCase(),
+    row,
+  ]))
 
   return {
-    profiles: addresses.map((address) => byAddress.get(address.toLowerCase()) ?? {
-      address,
-      username: null,
-      pfpUrl: null,
+    profiles: addresses.map((address) => {
+      const lowerAddress = address.toLowerCase()
+      const profile = profilesByAddress.get(lowerAddress)
+      const social = socialsByAddress.get(lowerAddress)
+
+      return {
+        address,
+        username: profile?.username ?? social?.twitter_handle ?? social?.discord_username ?? null,
+        pfpUrl: profile?.pfpUrl ?? null,
+      }
     }),
   }
 }
