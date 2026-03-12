@@ -23,6 +23,7 @@ const GAME_STARTED_EVENT = parseAbiItem('event GameStarted(uint64 indexed roundI
 const BUYBACK_EVENT = parseAbiItem(
   'event BuybackExecuted(uint256 ethSpent, uint256 lootReceived, uint256 lootBurned, uint256 lootToStakers)'
 )
+const TRANSFER_EVENT = parseAbiItem('event Transfer(address indexed from, address indexed to, uint256 value)')
 const VAULT_EVENT = parseAbiItem('event VaultReceived(uint256 amount, uint256 totalVaulted)')
 const STAKE_DEPOSIT_EVENT = parseAbiItem('event Deposited(address indexed user, uint256 amount, uint256 newBalance)')
 const STAKE_WITHDRAW_EVENT = parseAbiItem('event Withdrawn(address indexed user, uint256 amount, uint256 newBalance)')
@@ -52,6 +53,7 @@ const LOCKER_REWARDS_READ_ABI = parseAbi([
   'function totalNotified() view returns (uint256)',
   'function totalClaimed() view returns (uint256)',
 ])
+const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000' as Address
 
 type DeploymentLog = Log<bigint, number, false, typeof DEPLOYED_EVENT> | Log<bigint, number, false, typeof DEPLOYED_FOR_EVENT>
 type LockerStateLog =
@@ -59,6 +61,7 @@ type LockerStateLog =
   | Log<bigint, number, false, typeof ADDED_TO_LOCK_EVENT>
   | Log<bigint, number, false, typeof EXTENDED_LOCK_EVENT>
   | Log<bigint, number, false, typeof UNLOCKED_EVENT>
+type DirectBurnLog = Log<bigint, number, false, typeof TRANSFER_EVENT>
 type CurrentRoundBlockState = {
   id: number
   deployed: bigint
@@ -515,6 +518,33 @@ async function getBuybackLogs() {
     event: BUYBACK_EVENT,
     fromBlock: env.scanStartBlock,
     toBlock: 'latest',
+  })
+}
+
+async function getDirectBurnLogs() {
+  return getCachedLogsPaged('loot:burns', GLOBAL_LOG_CACHE_TTL_MS, {
+    address: CONTRACTS.loot,
+    event: TRANSFER_EVENT,
+    args: { to: ZERO_ADDRESS },
+    fromBlock: env.scanStartBlock,
+    toBlock: 'latest',
+  }) as Promise<DirectBurnLog[]>
+}
+
+async function getStandaloneBurnLogs() {
+  return withCache('loot:standalone-burns', 30_000, async () => {
+    const [burnLogs, buybackLogs] = await Promise.all([
+      getDirectBurnLogs(),
+      getBuybackLogs(),
+    ])
+
+    const buybackTxHashes = new Set(
+      buybackLogs.map((log) => log.transactionHash.toLowerCase())
+    )
+
+    return burnLogs
+      .filter((log) => !buybackTxHashes.has(log.transactionHash.toLowerCase()))
+      .sort(compareLogsDesc)
   })
 }
 
@@ -1077,24 +1107,31 @@ export async function getRounds(page = 1, limit = 12, lootpotOnly = false) {
 export async function getTreasuryStats() {
   return withCache('treasury-stats', 15_000, async () => {
     const status = await getProtocolStatus()
-    const [stats, vaultLogs] = await Promise.all([
+    const [stats, vaultLogs, standaloneBurnLogs] = await Promise.all([
       publicClient.readContract({
         address: CONTRACTS.treasury,
         abi: treasuryAbi,
         functionName: 'getStats',
       }) as Promise<[bigint, bigint, bigint, bigint]>,
       status.currentRoundId === 0n ? Promise.resolve([]) : getVaultLogs(),
+      getStandaloneBurnLogs(),
     ])
 
     const totalVaultedLifetime = vaultLogs.reduce((sum, log) => sum + toBigInt(log.args.amount), 0n)
+    const directBurnedLifetime = standaloneBurnLogs.reduce((sum, log) => sum + toBigInt(log.args.value), 0n)
+    const totalBurnedLifetime = stats[1] + directBurnedLifetime
 
     return {
       totalVaulted: totalVaultedLifetime.toString(),
       totalVaultedFormatted: etherString(totalVaultedLifetime),
       currentVaulted: stats[0].toString(),
       currentVaultedFormatted: etherString(stats[0]),
-      totalBurned: stats[1].toString(),
-      totalBurnedFormatted: etherString(stats[1]),
+      totalBurned: totalBurnedLifetime.toString(),
+      totalBurnedFormatted: etherString(totalBurnedLifetime),
+      buybackBurned: stats[1].toString(),
+      buybackBurnedFormatted: etherString(stats[1]),
+      directBurned: directBurnedLifetime.toString(),
+      directBurnedFormatted: etherString(directBurnedLifetime),
       totalDistributedToStakers: stats[2].toString(),
       totalDistributedToStakersFormatted: etherString(stats[2]),
       totalBuybacks: Number(stats[3]),
@@ -1104,29 +1141,53 @@ export async function getTreasuryStats() {
 
 export async function getBuybacks(page = 1, limit = 12) {
   return withCache(`buybacks:${page}:${limit}`, 30_000, async () => {
-    const logs = await getBuybackLogs()
+    const [buybackLogs, standaloneBurnLogs] = await Promise.all([
+      getBuybackLogs(),
+      getStandaloneBurnLogs(),
+    ])
 
-    const ordered = [...logs].sort((a, b) =>
-      compareLogsDesc(a, b)
-    )
+    const ordered = [
+      ...buybackLogs.map((log) => ({ type: 'buyback' as const, log })),
+      ...standaloneBurnLogs.map((log) => ({ type: 'burn' as const, log })),
+    ].sort((a, b) => compareLogsDesc(a.log, b.log))
     const total = ordered.length
     const pages = Math.max(1, Math.ceil(total / limit))
     const slice = ordered.slice((page - 1) * limit, page * limit)
 
-    const buybacks = await Promise.all(slice.map(async (log) => {
+    const buybacks = await Promise.all(slice.map(async ({ type, log }) => {
       const timestampMs = await getBlockTimestampMs(getLogBlockNumber(log))
+
+      if (type === 'buyback') {
+        return {
+          type,
+          ethSpent: toBigInt(log.args.ethSpent).toString(),
+          ethSpentFormatted: etherString(toBigInt(log.args.ethSpent)),
+          lootReceived: toBigInt(log.args.lootReceived).toString(),
+          lootReceivedFormatted: etherString(toBigInt(log.args.lootReceived)),
+          lootBurned: toBigInt(log.args.lootBurned).toString(),
+          lootBurnedFormatted: etherString(toBigInt(log.args.lootBurned)),
+          lootToStakers: toBigInt(log.args.lootToStakers).toString(),
+          lootToStakersFormatted: etherString(toBigInt(log.args.lootToStakers)),
+          txHash: log.transactionHash,
+          blockNumber: Number(log.blockNumber),
+          timestamp: new Date(timestampMs).toISOString(),
+        }
+      }
+
       return {
-        ethSpent: toBigInt(log.args.ethSpent).toString(),
-        ethSpentFormatted: etherString(toBigInt(log.args.ethSpent)),
-        lootReceived: toBigInt(log.args.lootReceived).toString(),
-        lootReceivedFormatted: etherString(toBigInt(log.args.lootReceived)),
-        lootBurned: toBigInt(log.args.lootBurned).toString(),
-        lootBurnedFormatted: etherString(toBigInt(log.args.lootBurned)),
-        lootToStakers: toBigInt(log.args.lootToStakers).toString(),
-        lootToStakersFormatted: etherString(toBigInt(log.args.lootToStakers)),
+        type,
+        ethSpent: null,
+        ethSpentFormatted: null,
+        lootReceived: null,
+        lootReceivedFormatted: null,
+        lootBurned: toBigInt(log.args.value).toString(),
+        lootBurnedFormatted: etherString(toBigInt(log.args.value)),
+        lootToStakers: null,
+        lootToStakersFormatted: null,
         txHash: log.transactionHash,
         blockNumber: Number(log.blockNumber),
         timestamp: new Date(timestampMs).toISOString(),
+        burnedBy: normalizeAddress(log.args.from),
       }
     }))
 
