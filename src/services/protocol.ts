@@ -427,18 +427,21 @@ export async function getLootPrice() {
 
 export async function getStats() {
   return withCache('stats', 10_000, async () => {
-    const [totalMinted, price] = await Promise.all([
+    const [totalMinted, treasuryStats, price] = await Promise.all([
       publicClient.readContract({
         address: CONTRACTS.loot,
         abi: lootAbi,
         functionName: 'totalMinted',
       }) as Promise<bigint>,
+      getTreasuryStats(),
       getLootPrice(),
     ])
+    const totalBurned = toBigInt(treasuryStats.totalBurned)
+    const circulatingSupply = totalMinted > totalBurned ? totalMinted - totalBurned : 0n
 
     return {
-      totalSupply: totalMinted.toString(),
-      totalSupplyFormatted: etherString(totalMinted),
+      totalSupply: circulatingSupply.toString(),
+      totalSupplyFormatted: etherString(circulatingSupply),
       totalMinted: totalMinted.toString(),
       totalMintedFormatted: etherString(totalMinted),
       ...price.payload,
