@@ -1104,6 +1104,141 @@ export async function getRounds(page = 1, limit = 12, lootpotOnly = false) {
   })
 }
 
+function clampLookback(lookback: number) {
+  if (!Number.isFinite(lookback)) return 1000
+  return Math.max(25, Math.min(Math.floor(lookback), 5000))
+}
+
+export async function getCopilotContext(lookback = 1000) {
+  const safeLookback = clampLookback(lookback)
+
+  return withCache(`copilot-context:${safeLookback}`, 15_000, async () => {
+    const status = await getProtocolStatus()
+    const [stats, treasuryStats, stakingStats, lockStats, settledLogs] = await Promise.all([
+      getStats(),
+      getTreasuryStats(),
+      getStakingStats(),
+      getLockStats(),
+      status.gameStarted && status.currentRoundId > 0n ? getRoundSettledLogs() : Promise.resolve([]),
+    ])
+
+    const orderedSettled = [...settledLogs].sort(compareLogsDesc)
+    const slice = orderedSettled.slice(0, safeLookback)
+    const winningBlockCounts = Array.from({ length: 25 }, (_, index) => ({
+      block: index + 1,
+      wins: 0,
+      frequencyPct: 0,
+    }))
+
+    let lootpotHits = 0
+    let splitRounds = 0
+    let totalLootpotDistributed = 0n
+
+    for (const log of slice) {
+      const winningBlock = Number(log.args.winningBlock) + 1
+      if (winningBlock >= 1 && winningBlock <= 25) {
+        winningBlockCounts[winningBlock - 1].wins += 1
+      }
+
+      if (Boolean(log.args.isSplit)) splitRounds += 1
+
+      const lootpotAmount = toBigInt(log.args.lootpotAmount ?? 0n)
+      if (lootpotAmount > 0n) {
+        lootpotHits += 1
+        totalLootpotDistributed += lootpotAmount
+      }
+    }
+
+    const roundsAnalyzed = slice.length
+    for (const entry of winningBlockCounts) {
+      entry.frequencyPct = roundsAnalyzed > 0
+        ? Number(((entry.wins / roundsAnalyzed) * 100).toFixed(2))
+        : 0
+    }
+
+    const sortedBlocks = [...winningBlockCounts].sort((a, b) => (
+      b.wins === a.wins ? a.block - b.block : b.wins - a.wins
+    ))
+    const lastLootpotLog = orderedSettled.find((log) => toBigInt(log.args.lootpotAmount ?? 0n) > 0n) ?? null
+    const lastSplitLog = orderedSettled.find((log) => Boolean(log.args.isSplit)) ?? null
+    const latestRoundLog = orderedSettled[0] ?? null
+    const oldestRoundLog = slice.at(-1) ?? null
+
+    const [latestRoundTs, oldestRoundTs, lastLootpotTs, lastSplitTs] = await Promise.all([
+      latestRoundLog ? getBlockTimestampMs(getLogBlockNumber(latestRoundLog)) : Promise.resolve(null),
+      oldestRoundLog ? getBlockTimestampMs(getLogBlockNumber(oldestRoundLog)) : Promise.resolve(null),
+      lastLootpotLog ? getBlockTimestampMs(getLogBlockNumber(lastLootpotLog)) : Promise.resolve(null),
+      lastSplitLog ? getBlockTimestampMs(getLogBlockNumber(lastSplitLog)) : Promise.resolve(null),
+    ])
+
+    return {
+      metrics: {
+        maxSupply: '3000000',
+        totalMinted: stats.totalMinted,
+        totalMintedFormatted: stats.totalMintedFormatted,
+        lootPriceUsd: stats.loot.priceUsd,
+        totalBurned: treasuryStats.totalBurned,
+        totalBurnedFormatted: treasuryStats.totalBurnedFormatted,
+        totalRevenueEth: treasuryStats.totalVaulted,
+        totalRevenueEthFormatted: treasuryStats.totalVaultedFormatted,
+        totalStaked: stakingStats.totalStaked,
+        totalStakedFormatted: stakingStats.totalStakedFormatted,
+        stakingApr: stakingStats.apr,
+        lockedLoot: lockStats.protocolLocked,
+        lockedLootFormatted: lockStats.protocolLockedFormatted,
+        lockRewardsEth: lockStats.totalNotified,
+        lockRewardsEthFormatted: lockStats.totalNotifiedFormatted,
+        lockClaimedEth: lockStats.totalClaimed,
+        lockClaimedEthFormatted: lockStats.totalClaimedFormatted,
+        lockers: lockStats.lockers,
+        stakerYieldLoot: treasuryStats.totalDistributedToStakers,
+        stakerYieldLootFormatted: treasuryStats.totalDistributedToStakersFormatted,
+      },
+      history: {
+        lookback: safeLookback,
+        roundsAnalyzed,
+        totalSettledRounds: orderedSettled.length,
+        latestRoundId: latestRoundLog ? Number(latestRoundLog.args.roundId) : null,
+        latestRoundAt: latestRoundTs ? new Date(latestRoundTs).toISOString() : null,
+        latestRoundRelative: latestRoundTs ? relativeTime(latestRoundTs) : null,
+        oldestRoundInSampleId: oldestRoundLog ? Number(oldestRoundLog.args.roundId) : null,
+        oldestRoundInSampleAt: oldestRoundTs ? new Date(oldestRoundTs).toISOString() : null,
+        oldestRoundInSampleRelative: oldestRoundTs ? relativeTime(oldestRoundTs) : null,
+        winningBlockCounts,
+        mostFrequentBlocks: sortedBlocks.slice(0, 3),
+        leastFrequentBlocks: [...sortedBlocks].reverse().slice(0, 3).sort((a, b) => (
+          a.wins === b.wins ? a.block - b.block : a.wins - b.wins
+        )),
+        expectedWinRatePct: Number((100 / 25).toFixed(2)),
+        lootpotHits,
+        splitRounds,
+        totalLootpotDistributed: totalLootpotDistributed.toString(),
+        totalLootpotDistributedFormatted: etherString(totalLootpotDistributed),
+        lastLootpot: lastLootpotLog && lastLootpotTs
+          ? {
+              roundId: Number(lastLootpotLog.args.roundId),
+              winningBlock: Number(lastLootpotLog.args.winningBlock) + 1,
+              lootpotAmount: toBigInt(lastLootpotLog.args.lootpotAmount ?? 0n).toString(),
+              lootpotAmountFormatted: etherString(toBigInt(lastLootpotLog.args.lootpotAmount ?? 0n)),
+              timestamp: new Date(lastLootpotTs).toISOString(),
+              relativeTime: relativeTime(lastLootpotTs),
+              txHash: lastLootpotLog.transactionHash ?? null,
+            }
+          : null,
+        lastSplitRound: lastSplitLog && lastSplitTs
+          ? {
+              roundId: Number(lastSplitLog.args.roundId),
+              winningBlock: Number(lastSplitLog.args.winningBlock) + 1,
+              timestamp: new Date(lastSplitTs).toISOString(),
+              relativeTime: relativeTime(lastSplitTs),
+              txHash: lastSplitLog.transactionHash ?? null,
+            }
+          : null,
+      },
+    }
+  })
+}
+
 export async function getTreasuryStats() {
   return withCache('treasury-stats', 15_000, async () => {
     const status = await getProtocolStatus()

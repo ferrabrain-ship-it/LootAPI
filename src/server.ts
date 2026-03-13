@@ -6,6 +6,7 @@ import {
   asAddress,
   getAutoMine,
   getBuybacks,
+  getCopilotContext,
   getCurrentRound,
   getLockDistributions,
   getLatestRoundTransition,
@@ -85,6 +86,11 @@ app.get('/api/round/:id/miners', async (req) => {
 app.get('/api/rounds', async (req) => {
   const { page = '1', limit = '12', lootpot } = req.query as Record<string, string | undefined>
   return getRounds(Number(page), Number(limit), lootpot === 'true')
+})
+
+app.get('/api/copilot/context', async (req) => {
+  const { lookback = '1000' } = req.query as Record<string, string | undefined>
+  return getCopilotContext(Number(lookback))
 })
 
 app.get('/api/user/:address/rewards', async (req) => {
