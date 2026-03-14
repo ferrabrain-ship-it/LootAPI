@@ -1853,6 +1853,7 @@ export async function getLatestRoundTransition() {
       topMinerReward: '0',
       lootpotAmount: settled.lootpotAmount,
       isSplit: settled.isSplit,
+      settledAt: settled.settledAt,
     } : null,
     newRound: {
       roundId: current.roundId,
