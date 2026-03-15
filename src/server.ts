@@ -195,7 +195,7 @@ app.get('/api/events/rounds', async (_req, reply) => {
     } catch (error) {
       sendSse(reply, 'heartbeat', { timestamp: new Date().toISOString(), error: String(error) })
     }
-  }, 2500)
+  }, 1000)
 
   reply.raw.on('close', () => {
     clearInterval(timer)

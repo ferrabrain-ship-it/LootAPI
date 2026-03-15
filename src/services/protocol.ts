@@ -56,6 +56,7 @@ const LOCKER_REWARDS_READ_ABI = parseAbi([
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000' as Address
 
 type DeploymentLog = Log<bigint, number, false, typeof DEPLOYED_EVENT> | Log<bigint, number, false, typeof DEPLOYED_FOR_EVENT>
+type RoundSettledLog = Log<bigint, number, false, typeof ROUND_SETTLED_EVENT>
 type LockerStateLog =
   | Log<bigint, number, false, typeof LOCKED_EVENT>
   | Log<bigint, number, false, typeof ADDED_TO_LOCK_EVENT>
@@ -81,6 +82,7 @@ const blockTimestampCache = new Map<string, number>()
 const LOG_BLOCK_RANGE = 45_000n
 const MIN_LOG_BLOCK_RANGE = 1_000n
 const GLOBAL_LOG_CACHE_TTL_MS = 15_000
+const RECENT_SETTLED_LOOKBACK = 1_000n
 const RPC_RETRY_ATTEMPTS = 3
 const USER_HISTORY_MAX_LIMIT = 200
 const USER_HISTORY_CONCURRENCY = 8
@@ -483,18 +485,39 @@ async function getRoundSettledLogs() {
     event: ROUND_SETTLED_EVENT,
     fromBlock: env.scanStartBlock,
     toBlock: 'latest',
-  })
+  }) as Promise<RoundSettledLog[]>
 }
 
 async function getRoundSettledLogForRound(roundId: bigint, fresh = false) {
   const load = async () => {
-    const logs = await getLogsPaged({
+    let logs: RoundSettledLog[]
+
+    if (fresh) {
+      const latestBlock = await publicClient.getBlockNumber()
+      const recentFromBlock = latestBlock > RECENT_SETTLED_LOOKBACK
+        ? latestBlock - RECENT_SETTLED_LOOKBACK
+        : env.scanStartBlock
+
+      logs = await getLogsPaged({
+        address: CONTRACTS.gridMining,
+        event: ROUND_SETTLED_EVENT,
+        args: { roundId },
+        fromBlock: recentFromBlock,
+        toBlock: 'latest',
+      }) as RoundSettledLog[]
+
+      if (logs.length > 0) {
+        return logs.at(-1) ?? null
+      }
+    }
+
+    logs = await getLogsPaged({
       address: CONTRACTS.gridMining,
       event: ROUND_SETTLED_EVENT,
       args: { roundId },
       fromBlock: env.scanStartBlock,
       toBlock: 'latest',
-    })
+    }) as RoundSettledLog[]
 
     return logs.at(-1) ?? null
   }
@@ -1843,17 +1866,21 @@ export async function getLatestRoundTransition() {
   const current = await getCurrentRound()
   const roundId = BigInt(current.roundId)
   const previousRoundId = roundId > 1n ? roundId - 1n : 0n
-  const settled = previousRoundId > 0n ? await getRound(previousRoundId).catch(() => null) : null
+  const settledLog = previousRoundId > 0n
+    ? await getRoundSettledLogForRound(previousRoundId, true).catch(() => null)
+    : null
+  const settledAtMs = settledLog?.blockNumber ? await getBlockTimestampMs(settledLog.blockNumber).catch(() => null) : null
+
   return {
-    settled: settled && settled.txHash ? {
-      roundId: settled.roundId.toString(),
-      winningBlock: settled.winningBlock.toString(),
-      topMiner: settled.topMiner ?? '0x0000000000000000000000000000000000000000',
-      totalWinnings: settled.totalWinnings,
-      topMinerReward: '0',
-      lootpotAmount: settled.lootpotAmount,
-      isSplit: settled.isSplit,
-      settledAt: settled.settledAt,
+    settled: settledLog ? {
+      roundId: previousRoundId.toString(),
+      winningBlock: Number(settledLog.args.winningBlock).toString(),
+      topMiner: normalizeAddress(settledLog.args.topMiner),
+      totalWinnings: toBigInt(settledLog.args.totalWinnings).toString(),
+      topMinerReward: toBigInt(settledLog.args.topMinerReward).toString(),
+      lootpotAmount: toBigInt(settledLog.args.lootpotAmount).toString(),
+      isSplit: Boolean(settledLog.args.isSplit),
+      settledAt: settledAtMs ? new Date(settledAtMs).toISOString() : undefined,
     } : null,
     newRound: {
       roundId: current.roundId,
