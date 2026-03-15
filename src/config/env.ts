@@ -4,6 +4,7 @@ export const env = {
   port: Number(process.env.PORT || 3001),
   corsOrigin: process.env.CORS_ORIGIN || 'http://localhost:3000',
   appUrl: process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000',
+  enableLootpotWorker: process.env.ENABLE_LOOTPOT_WORKER === 'true',
   discordLootpotWebhookUrl: process.env.DISCORD_LOOTPOT_WEBHOOK_URL || '',
   discordBotAssetBaseUrl: process.env.DISCORD_BOT_ASSET_BASE_URL || process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000',
   discordLootpotEmoji: process.env.DISCORD_LOOTPOT_EMOJI || '🪙',

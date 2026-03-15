@@ -54,6 +54,7 @@ Use these Railway environment variables:
 ```env
 CORS_ORIGIN=https://mineloot.app
 NEXT_PUBLIC_APP_URL=https://mineloot.app
+ENABLE_LOOTPOT_WORKER=false
 RPC_URL_PRIMARY=https://mainnet.base.org
 RPC_URL_FALLBACK_1=https://base.llamarpc.com
 RPC_URL_FALLBACK_2=https://rpc.ankr.com/base
@@ -86,6 +87,14 @@ npm run worker:lootpot
 Recommended setup:
 - keep the HTTP API service with start command `npm run start`
 - create a second Railway service from the same repo with start command `npm run worker:lootpot`
+
+If you prefer a single Railway service, you can also enable the notifier inline on the API service:
+
+```env
+ENABLE_LOOTPOT_WORKER=true
+```
+
+In that mode `npm run start` will launch the HTTP API and the lootpot polling loop in the same container.
 
 The worker:
 - polls Base for `RoundSettled` events with a non-zero lootpot

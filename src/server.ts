@@ -26,8 +26,11 @@ import {
   getUserStake,
 } from './services/protocol.js'
 import { getProfile, getProfilesBatch } from './services/profiles.js'
+import { runLootpotNotifierOnce } from './services/lootpotNotifier.js'
 
 const app = Fastify({ logger: true })
+let lootpotWorkerStopping = false
+let lootpotWorkerTimer: NodeJS.Timeout | null = null
 
 await app.register(cors, {
   origin: true,
@@ -217,9 +220,45 @@ app.setErrorHandler((error, _req, reply) => {
   reply.status(500).send({ error: message })
 })
 
+function stopLootpotWorker() {
+  lootpotWorkerStopping = true
+  if (lootpotWorkerTimer) {
+    clearTimeout(lootpotWorkerTimer)
+    lootpotWorkerTimer = null
+  }
+}
+
+function startLootpotWorker() {
+  if (!env.enableLootpotWorker) return
+
+  app.log.info(`[lootpot-worker] inline mode enabled, poll interval ${env.lootpotPollIntervalMs}ms`)
+
+  const tick = async () => {
+    if (lootpotWorkerStopping) return
+
+    try {
+      const result = await runLootpotNotifierOnce({ logger: console })
+      app.log.info({ result }, '[lootpot-worker] cycle complete')
+    } catch (error) {
+      app.log.error(error, '[lootpot-worker] cycle failed')
+    }
+
+    if (lootpotWorkerStopping) return
+    lootpotWorkerTimer = setTimeout(() => {
+      void tick()
+    }, env.lootpotPollIntervalMs)
+  }
+
+  void tick()
+}
+
+process.on('SIGTERM', stopLootpotWorker)
+process.on('SIGINT', stopLootpotWorker)
+
 app.listen({ port: env.port, host: '0.0.0.0' })
   .then(() => {
     app.log.info(`mineloot-api listening on :${env.port}`)
+    startLootpotWorker()
   })
   .catch((error) => {
     app.log.error(error)
