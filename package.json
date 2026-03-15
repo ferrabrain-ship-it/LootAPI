@@ -7,7 +7,9 @@
     "dev": "tsx watch src/server.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/server.js",
-    "check": "tsc -p tsconfig.json --noEmit"
+    "check": "tsc -p tsconfig.json --noEmit",
+    "worker:lootpot": "tsx src/jobs/lootpotNotifier.ts",
+    "worker:lootpot:test": "LOOTPOT_WORKER_TEST=true tsx src/jobs/lootpotNotifier.ts"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.1",

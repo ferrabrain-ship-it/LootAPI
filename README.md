@@ -12,7 +12,7 @@ What it covers:
 - optional profile reads via Supabase
 
 What it does not replicate yet:
-- the original private indexer / webhook infra from the upstream project
+- the original private indexer infra from the upstream project
 - push-driven per-user SSE events
 - auth/OAuth routes
 
@@ -61,9 +61,39 @@ RPC_URL_FALLBACK_3=https://base-rpc.publicnode.com
 LOYALTY_SCAN_START_BLOCK=43103600
 SUPABASE_URL=
 SUPABASE_SERVICE_ROLE_KEY=
+DISCORD_LOOTPOT_WEBHOOK_URL=
+DISCORD_BOT_ASSET_BASE_URL=https://mineloot.app
+DISCORD_LOOTPOT_EMOJI=🪙
+DISCORD_LOOT_EMOJI=🪙
+DISCORD_USD_EMOJI=💵
+LOOTPOT_LOOKBACK_BLOCKS=21600
+LOOTPOT_POLL_INTERVAL_MS=120000
 ```
 
 Notes:
 - `PORT` is injected by Railway automatically.
 - Supabase is optional. If omitted, profile endpoints still work but return empty profile data.
 - Healthcheck path is `/health`.
+
+## Lootpot bot on Railway
+
+Run the Discord lootpot notifier as a separate Railway service from the same repo:
+
+```bash
+npm run worker:lootpot
+```
+
+Recommended setup:
+- keep the HTTP API service with start command `npm run start`
+- create a second Railway service from the same repo with start command `npm run worker:lootpot`
+
+The worker:
+- polls Base for `RoundSettled` events with a non-zero lootpot
+- deduplicates announcements through Supabase table `lootpot_announcements`
+- posts the Discord embed directly through your webhook
+
+For a one-shot validation run:
+
+```bash
+npm run worker:lootpot:test
+```

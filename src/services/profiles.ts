@@ -1,10 +1,6 @@
-import { createClient } from '@supabase/supabase-js'
 import type { Address } from 'viem'
 import { env } from '../config/env.js'
-
-const supabase = env.supabaseUrl && env.supabaseServiceRoleKey
-  ? createClient(env.supabaseUrl, env.supabaseServiceRoleKey, { auth: { persistSession: false } })
-  : null
+import { supabaseAdmin as supabase } from '../lib/supabase.js'
 
 export interface ProfileShape {
   address: string
