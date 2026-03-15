@@ -12,6 +12,10 @@ const LOOT_LOGO_URL = `${env.discordBotAssetBaseUrl.replace(/\/$/, '')}/loot-log
 
 type Logger = Pick<typeof console, 'info' | 'warn' | 'error'>
 
+function isMissingLootpotAnnouncementsTable(message: string) {
+  return message.includes("Could not find the table 'public.lootpot_announcements'")
+}
+
 function formatLoot(value: number) {
   return new Intl.NumberFormat('en-US', {
     minimumFractionDigits: 3,
@@ -138,6 +142,11 @@ export async function runLootpotNotifierOnce(options?: {
       .maybeSingle()
 
     if (selectError) {
+      if (isMissingLootpotAnnouncementsTable(selectError.message)) {
+        throw new Error(
+          "Missing Supabase table public.lootpot_announcements. Run sql/lootpot_announcements.sql in Supabase, then redeploy or restart the worker."
+        )
+      }
       throw new Error(`Supabase select failed for round #${roundId}: ${selectError.message}`)
     }
 
@@ -150,6 +159,11 @@ export async function runLootpotNotifierOnce(options?: {
       .insert({ round_id: roundId })
 
     if (insertError) {
+      if (isMissingLootpotAnnouncementsTable(insertError.message)) {
+        throw new Error(
+          "Missing Supabase table public.lootpot_announcements. Run sql/lootpot_announcements.sql in Supabase, then redeploy or restart the worker."
+        )
+      }
       throw new Error(`Supabase insert failed for round #${roundId}: ${insertError.message}`)
     }
 
