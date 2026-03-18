@@ -1,5 +1,6 @@
 import type { PoolClient } from 'pg'
 import { formatEther, getAddress, parseEther, type Address } from 'viem'
+import { CONTRACTS } from '../config/contracts.js'
 import { env } from '../config/env.js'
 import { getAgentStatsPool } from '../lib/agentStatsDb.js'
 import { decodeBlockMask, safeAddressEq, toBigInt } from '../lib/format.js'
@@ -178,7 +179,7 @@ async function mapWithConcurrency<T, R>(items: T[], concurrency: number, mapper:
 }
 
 async function getLootPriceNativeEth() {
-  const response = await fetch('https://api.dexscreener.com/latest/dex/tokens/0x176f3dab24a159341c0509bb36b833e7fdd0a132', {
+  const response = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${CONTRACTS.loot}`, {
     cache: 'no-store',
   })
 
@@ -704,4 +705,3 @@ export async function runAgentStatsSyncOnce(options?: { wallets?: Address[]; log
     synced: wallets.length,
   }
 }
-
