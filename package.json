@@ -8,6 +8,7 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/server.js",
     "check": "tsc -p tsconfig.json --noEmit",
+    "db:init:agents": "tsx src/scripts/initAgentStatsDb.ts",
     "worker:lootpot": "tsx src/jobs/lootpotNotifier.ts",
     "worker:lootpot:test": "LOOTPOT_WORKER_TEST=true tsx src/jobs/lootpotNotifier.ts"
   },
@@ -16,10 +17,12 @@
     "@supabase/supabase-js": "^2.49.1",
     "dotenv": "^16.4.7",
     "fastify": "^5.2.1",
+    "pg": "^8.20.0",
     "viem": "^2.37.5"
   },
   "devDependencies": {
     "@types/node": "^22.13.10",
+    "@types/pg": "^8.18.0",
     "tsx": "^4.19.3",
     "typescript": "^5.8.2"
   }
