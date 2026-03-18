@@ -3,6 +3,10 @@ import cors from '@fastify/cors'
 import type { FastifyReply, FastifyRequest } from 'fastify'
 import { env } from './config/env.js'
 import {
+  getAgentWalletStats,
+  runAgentStatsSyncOnce,
+} from './services/agentStats.js'
+import {
   asAddress,
   getAutoMine,
   getBuybacks,
@@ -33,6 +37,8 @@ const app = Fastify({ logger: true })
 let lootpotWorkerStopping = false
 let lootpotWorkerTimer: NodeJS.Timeout | null = null
 let cacheWarmTimer: NodeJS.Timeout | null = null
+let agentStatsWorkerStopping = false
+let agentStatsWorkerTimer: NodeJS.Timeout | null = null
 
 await app.register(cors, {
   origin: true,
@@ -117,6 +123,12 @@ app.get('/api/user/:address/history', async (req) => {
 app.get('/api/user/:address/profile', async (req) => {
   const { address } = req.params as { address: string }
   return getProfile(asAddress(address))
+})
+
+app.get('/api/agent-stats/:address', async (req) => {
+  const { address } = req.params as { address: string }
+  const { recent = '12' } = req.query as Record<string, string | undefined>
+  return getAgentWalletStats(asAddress(address), Number(recent))
 })
 
 app.get('/api/profiles/batch', async (req) => {
@@ -237,6 +249,14 @@ function stopCacheWarmer() {
   }
 }
 
+function stopAgentStatsWorker() {
+  agentStatsWorkerStopping = true
+  if (agentStatsWorkerTimer) {
+    clearTimeout(agentStatsWorkerTimer)
+    agentStatsWorkerTimer = null
+  }
+}
+
 function startCacheWarmer() {
   const run = async () => {
     try {
@@ -277,12 +297,38 @@ function startLootpotWorker() {
   void tick()
 }
 
+function startAgentStatsWorker() {
+  if (!env.agentStatsWallets.trim()) return
+
+  app.log.info(`[agent-stats-worker] inline mode enabled, poll interval ${env.agentStatsSyncIntervalMs}ms`)
+
+  const tick = async () => {
+    if (agentStatsWorkerStopping) return
+
+    try {
+      const result = await runAgentStatsSyncOnce({ logger: console })
+      app.log.info({ result }, '[agent-stats-worker] cycle complete')
+    } catch (error) {
+      app.log.error(error, '[agent-stats-worker] cycle failed')
+    }
+
+    if (agentStatsWorkerStopping) return
+    agentStatsWorkerTimer = setTimeout(() => {
+      void tick()
+    }, env.agentStatsSyncIntervalMs)
+  }
+
+  void tick()
+}
+
 process.on('SIGTERM', () => {
   stopLootpotWorker()
+  stopAgentStatsWorker()
   stopCacheWarmer()
 })
 process.on('SIGINT', () => {
   stopLootpotWorker()
+  stopAgentStatsWorker()
   stopCacheWarmer()
 })
 
@@ -291,6 +337,7 @@ app.listen({ port: env.port, host: '0.0.0.0' })
     app.log.info(`mineloot-api listening on :${env.port}`)
     startCacheWarmer()
     startLootpotWorker()
+    startAgentStatsWorker()
   })
   .catch((error) => {
     app.log.error(error)

@@ -55,7 +55,7 @@ const LOCKER_REWARDS_READ_ABI = parseAbi([
 ])
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000' as Address
 
-type DeploymentLog = Log<bigint, number, false, typeof DEPLOYED_EVENT> | Log<bigint, number, false, typeof DEPLOYED_FOR_EVENT>
+export type DeploymentLog = Log<bigint, number, false, typeof DEPLOYED_EVENT> | Log<bigint, number, false, typeof DEPLOYED_FOR_EVENT>
 type RoundSettledLog = Log<bigint, number, false, typeof ROUND_SETTLED_EVENT>
 type LockerStateLog =
   | Log<bigint, number, false, typeof LOCKED_EVENT>
@@ -592,7 +592,7 @@ async function getRoundDeployLogs(roundId: bigint) {
   })
 }
 
-async function getAllDeploymentLogs() {
+export async function getAllDeploymentLogs() {
   return withCache('logs:grid:deployments', GLOBAL_LOG_CACHE_TTL_MS, async () => {
     const [direct, delegated] = await Promise.all([
       getCachedLogsPaged('grid:deployed', GLOBAL_LOG_CACHE_TTL_MS, {

@@ -9,6 +9,8 @@
     "start": "node dist/server.js",
     "check": "tsc -p tsconfig.json --noEmit",
     "db:init:agents": "tsx src/scripts/initAgentStatsDb.ts",
+    "sync:agents:once": "tsx src/jobs/agentStatsSync.ts --once",
+    "worker:agent-stats": "tsx src/jobs/agentStatsSync.ts",
     "worker:lootpot": "tsx src/jobs/lootpotNotifier.ts",
     "worker:lootpot:test": "LOOTPOT_WORKER_TEST=true tsx src/jobs/lootpotNotifier.ts"
   },
