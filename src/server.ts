@@ -24,6 +24,7 @@ import {
   getUserHistory,
   getUserRewards,
   getUserStake,
+  warmProtocolCaches,
 } from './services/protocol.js'
 import { getProfile, getProfilesBatch } from './services/profiles.js'
 import { runLootpotNotifierOnce } from './services/lootpotNotifier.js'
@@ -31,6 +32,7 @@ import { runLootpotNotifierOnce } from './services/lootpotNotifier.js'
 const app = Fastify({ logger: true })
 let lootpotWorkerStopping = false
 let lootpotWorkerTimer: NodeJS.Timeout | null = null
+let cacheWarmTimer: NodeJS.Timeout | null = null
 
 await app.register(cors, {
   origin: true,
@@ -228,6 +230,29 @@ function stopLootpotWorker() {
   }
 }
 
+function stopCacheWarmer() {
+  if (cacheWarmTimer) {
+    clearInterval(cacheWarmTimer)
+    cacheWarmTimer = null
+  }
+}
+
+function startCacheWarmer() {
+  const run = async () => {
+    try {
+      await warmProtocolCaches()
+      app.log.info('[cache-warmer] cycle complete')
+    } catch (error) {
+      app.log.error(error, '[cache-warmer] cycle failed')
+    }
+  }
+
+  void run()
+  cacheWarmTimer = setInterval(() => {
+    void run()
+  }, 45_000)
+}
+
 function startLootpotWorker() {
   if (!env.enableLootpotWorker) return
 
@@ -252,12 +277,19 @@ function startLootpotWorker() {
   void tick()
 }
 
-process.on('SIGTERM', stopLootpotWorker)
-process.on('SIGINT', stopLootpotWorker)
+process.on('SIGTERM', () => {
+  stopLootpotWorker()
+  stopCacheWarmer()
+})
+process.on('SIGINT', () => {
+  stopLootpotWorker()
+  stopCacheWarmer()
+})
 
 app.listen({ port: env.port, host: '0.0.0.0' })
   .then(() => {
     app.log.info(`mineloot-api listening on :${env.port}`)
+    startCacheWarmer()
     startLootpotWorker()
   })
   .catch((error) => {

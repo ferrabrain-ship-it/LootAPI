@@ -77,20 +77,39 @@ type LockerSnapshot = {
   userLocked: Map<string, bigint>
   userWeight: Map<string, bigint>
 }
+type HistoricalLogCacheEntry = {
+  expiresAt: number
+  fromBlock: bigint
+  toBlock: bigint
+  logs: unknown[]
+}
+type DeploymentSnapshot = {
+  byRound: Map<bigint, DeploymentLog[]>
+  totalsByUser: Map<string, bigint>
+}
+type StakeSnapshot = {
+  balances: Map<string, bigint>
+}
 
 const blockTimestampCache = new Map<string, number>()
-const LOG_BLOCK_RANGE = 45_000n
+const LOG_BLOCK_RANGE = 10_000n
 const MIN_LOG_BLOCK_RANGE = 1_000n
-const GLOBAL_LOG_CACHE_TTL_MS = 15_000
+const GLOBAL_LOG_CACHE_TTL_MS = 60_000
+const HEAVY_ROUTE_CACHE_TTL_MS = 60_000
 const RECENT_SETTLED_LOOKBACK = 1_000n
+const RECENT_SETTLED_LIST_LOOKBACK = 5_000n
+const RECENT_DEPLOY_LOOKBACK = 5_000n
 const RPC_RETRY_ATTEMPTS = 3
 const USER_HISTORY_MAX_LIMIT = 200
 const USER_HISTORY_CONCURRENCY = 8
+const LEADERBOARD_EARNERS_CONCURRENCY = 6
 let scanStartBlockPromise: Promise<bigint> | null = null
 let protocolStatusCache: { value: Promise<{ gameStarted: boolean; currentRoundId: bigint }>; expiresAt: number } | null = null
 let currentRoundCache: CurrentRoundCache | null = null
 const responseCache = new Map<string, { expiresAt: number; value: unknown }>()
 const inflightCache = new Map<string, Promise<unknown>>()
+const historicalLogCache = new Map<string, HistoricalLogCacheEntry>()
+const historicalLogInflight = new Map<string, Promise<unknown[]>>()
 
 async function withCache<T>(key: string, ttlMs: number, loader: () => Promise<T>): Promise<T> {
   const now = Date.now()
@@ -130,7 +149,7 @@ async function getBlockTimestampMs(blockNumber: bigint): Promise<number> {
   const key = blockNumber.toString()
   const cached = blockTimestampCache.get(key)
   if (cached) return cached
-  const block = await publicClient.getBlock({ blockNumber })
+  const block = await withRpcRetries(() => publicClient.getBlock({ blockNumber }))
   const ts = Number(block.timestamp) * 1000
   blockTimestampCache.set(key, ts)
   return ts
@@ -204,13 +223,39 @@ function isRetryableRpcErrorMessage(message: string) {
     m.includes('econnreset') ||
     m.includes('etimedout') ||
     m.includes('429') ||
+    m.includes('too many requests') ||
     m.includes('rate limit') ||
+    m.includes('quota') ||
+    m.includes('credits') ||
+    m.includes('resource not found') ||
     m.includes('gateway timeout')
   )
 }
 
 async function sleep(ms: number) {
   await new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+async function withRpcRetries<T>(loader: () => Promise<T>): Promise<T> {
+  let lastError: unknown
+
+  for (let attempt = 0; attempt < RPC_RETRY_ATTEMPTS; attempt++) {
+    try {
+      return await loader()
+    } catch (error) {
+      lastError = error
+      const message = error instanceof Error ? error.message : String(error)
+      const isLastAttempt = attempt >= RPC_RETRY_ATTEMPTS - 1
+
+      if (!isRetryableRpcErrorMessage(message) || isLastAttempt) {
+        throw error
+      }
+
+      await sleep(150 * (attempt + 1))
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error(String(lastError))
 }
 
 async function mapWithConcurrency<T, R>(
@@ -329,7 +374,70 @@ async function getCachedLogsPaged<TEvent extends AbiEvent | undefined>(
     toBlock?: bigint | 'latest'
   }
 ) {
-  return withCache(`logs:${key}`, ttlMs, () => getLogsPaged(params))
+  const cacheKey = `logs:${key}`
+  const now = Date.now()
+  const resolvedToBlock = params.toBlock === 'latest' || params.toBlock === undefined
+    ? await withRpcRetries(() => publicClient.getBlockNumber())
+    : params.toBlock
+  const resolvedFromBlock = params.fromBlock && params.fromBlock > 0n
+    ? params.fromBlock
+    : await getScanStartBlock()
+
+  const cached = historicalLogCache.get(cacheKey)
+  if (
+    cached &&
+    cached.expiresAt > now &&
+    cached.fromBlock === resolvedFromBlock &&
+    cached.toBlock >= resolvedToBlock
+  ) {
+    return cached.logs as Log<bigint, number, false, TEvent>[]
+  }
+
+  const inflight = historicalLogInflight.get(cacheKey)
+  if (inflight) {
+    return inflight as Promise<Log<bigint, number, false, TEvent>[]>
+  }
+
+  const promise = (async () => {
+    let logs: Log<bigint, number, false, TEvent>[]
+
+    if (cached && cached.fromBlock === resolvedFromBlock) {
+      if (cached.toBlock >= resolvedToBlock) {
+        logs = cached.logs as Log<bigint, number, false, TEvent>[]
+      } else {
+        const nextFromBlock = cached.toBlock + 1n
+        const delta = nextFromBlock <= resolvedToBlock
+          ? await getLogsPaged({
+              ...params,
+              fromBlock: nextFromBlock,
+              toBlock: resolvedToBlock,
+            })
+          : []
+        logs = [...(cached.logs as Log<bigint, number, false, TEvent>[]), ...delta]
+      }
+    } else {
+      logs = await getLogsPaged({
+        ...params,
+        fromBlock: resolvedFromBlock,
+        toBlock: resolvedToBlock,
+      })
+    }
+
+    historicalLogCache.set(cacheKey, {
+      expiresAt: Date.now() + ttlMs,
+      fromBlock: resolvedFromBlock,
+      toBlock: resolvedToBlock,
+      logs,
+    })
+    historicalLogInflight.delete(cacheKey)
+    return logs
+  })().catch((error) => {
+    historicalLogInflight.delete(cacheKey)
+    throw error
+  })
+
+  historicalLogInflight.set(cacheKey, promise as Promise<unknown[]>)
+  return promise
 }
 
 function getLogBlockNumber(log: { blockNumber: bigint | null }): bigint {
@@ -380,16 +488,16 @@ async function getProtocolStatus() {
   }
 
   const value = Promise.all([
-    publicClient.readContract({
+    withRpcRetries(() => publicClient.readContract({
       address: CONTRACTS.gridMining,
       abi: gridMiningAbi,
       functionName: 'gameStarted',
-    }) as Promise<boolean>,
-    publicClient.readContract({
+    }) as Promise<boolean>),
+    withRpcRetries(() => publicClient.readContract({
       address: CONTRACTS.gridMining,
       abi: gridMiningAbi,
       functionName: 'currentRoundId',
-    }) as Promise<bigint>,
+    }) as Promise<bigint>),
   ]).then(([gameStarted, currentRoundId]) => ({ gameStarted, currentRoundId }))
 
   protocolStatusCache = {
@@ -428,13 +536,13 @@ export async function getLootPrice() {
 }
 
 export async function getStats() {
-  return withCache('stats', 10_000, async () => {
+  return withCache('stats', HEAVY_ROUTE_CACHE_TTL_MS, async () => {
     const [totalMinted, treasuryStats, price] = await Promise.all([
-      publicClient.readContract({
+      withRpcRetries(() => publicClient.readContract({
         address: CONTRACTS.loot,
         abi: lootAbi,
         functionName: 'totalMinted',
-      }) as Promise<bigint>,
+      }) as Promise<bigint>),
       getTreasuryStats(),
       getLootPrice(),
     ])
@@ -453,8 +561,34 @@ export async function getStats() {
 
 async function getRoundDeployLogs(roundId: bigint) {
   return withCache(`round-deploy-logs:${roundId.toString()}`, GLOBAL_LOG_CACHE_TTL_MS, async () => {
-    const allDeployments = await getAllDeploymentLogs()
-    return allDeployments.filter((log) => toBigInt(log.args.roundId) === roundId)
+    const latestBlock = await withRpcRetries(() => publicClient.getBlockNumber())
+    const recentFromBlock = latestBlock > RECENT_DEPLOY_LOOKBACK
+      ? latestBlock - RECENT_DEPLOY_LOOKBACK
+      : env.scanStartBlock
+
+    const [directRecent, delegatedRecent] = await Promise.all([
+      getLogsPaged({
+        address: CONTRACTS.gridMining,
+        event: DEPLOYED_EVENT,
+        args: { roundId },
+        fromBlock: recentFromBlock,
+        toBlock: 'latest',
+      }),
+      getLogsPaged({
+        address: CONTRACTS.gridMining,
+        event: DEPLOYED_FOR_EVENT,
+        args: { roundId },
+        fromBlock: recentFromBlock,
+        toBlock: 'latest',
+      }),
+    ])
+
+    if (directRecent.length > 0 || delegatedRecent.length > 0) {
+      return [...directRecent, ...delegatedRecent].sort(compareLogsAsc) as DeploymentLog[]
+    }
+
+    const snapshot = await getDeploymentSnapshot()
+    return snapshot.byRound.get(roundId) ?? []
   })
 }
 
@@ -479,6 +613,31 @@ async function getAllDeploymentLogs() {
   })
 }
 
+async function getDeploymentSnapshot() {
+  return withCache('snapshot:grid:deployments', GLOBAL_LOG_CACHE_TTL_MS, async (): Promise<DeploymentSnapshot> => {
+    const logs = await getAllDeploymentLogs()
+    const byRound = new Map<bigint, DeploymentLog[]>()
+    const totalsByUser = new Map<string, bigint>()
+
+    for (const log of logs) {
+      const roundId = toBigInt(log.args.roundId)
+      const address = normalizeAddress(log.args.user)
+      const totalAmount = toBigInt(log.args.totalAmount)
+
+      const roundLogs = byRound.get(roundId)
+      if (roundLogs) {
+        roundLogs.push(log)
+      } else {
+        byRound.set(roundId, [log])
+      }
+
+      totalsByUser.set(address, (totalsByUser.get(address) ?? 0n) + totalAmount)
+    }
+
+    return { byRound, totalsByUser }
+  })
+}
+
 async function getRoundSettledLogs() {
   return getCachedLogsPaged('grid:round-settled', GLOBAL_LOG_CACHE_TTL_MS, {
     address: CONTRACTS.gridMining,
@@ -488,17 +647,31 @@ async function getRoundSettledLogs() {
   }) as Promise<RoundSettledLog[]>
 }
 
+async function getRecentRoundSettledLogs() {
+  return withCache('logs:grid:round-settled:recent', 15_000, async () => {
+    const latestBlock = await withRpcRetries(() => publicClient.getBlockNumber())
+    const recentFromBlock = latestBlock > RECENT_SETTLED_LIST_LOOKBACK
+      ? latestBlock - RECENT_SETTLED_LIST_LOOKBACK
+      : env.scanStartBlock
+
+    return getLogsPaged({
+      address: CONTRACTS.gridMining,
+      event: ROUND_SETTLED_EVENT,
+      fromBlock: recentFromBlock,
+      toBlock: 'latest',
+    }) as Promise<RoundSettledLog[]>
+  })
+}
+
 async function getRoundSettledLogForRound(roundId: bigint, fresh = false) {
   const load = async () => {
-    let logs: RoundSettledLog[]
-
     if (fresh) {
-      const latestBlock = await publicClient.getBlockNumber()
+      const latestBlock = await withRpcRetries(() => publicClient.getBlockNumber())
       const recentFromBlock = latestBlock > RECENT_SETTLED_LOOKBACK
         ? latestBlock - RECENT_SETTLED_LOOKBACK
         : env.scanStartBlock
 
-      logs = await getLogsPaged({
+      const freshLogs = await getLogsPaged({
         address: CONTRACTS.gridMining,
         event: ROUND_SETTLED_EVENT,
         args: { roundId },
@@ -506,20 +679,28 @@ async function getRoundSettledLogForRound(roundId: bigint, fresh = false) {
         toBlock: 'latest',
       }) as RoundSettledLog[]
 
-      if (logs.length > 0) {
-        return logs.at(-1) ?? null
+      if (freshLogs.length > 0) {
+        return freshLogs.at(-1) ?? null
       }
     }
 
-    logs = await getLogsPaged({
-      address: CONTRACTS.gridMining,
-      event: ROUND_SETTLED_EVENT,
-      args: { roundId },
-      fromBlock: env.scanStartBlock,
-      toBlock: 'latest',
-    }) as RoundSettledLog[]
+    const recentLogs = await getRecentRoundSettledLogs()
+    for (let index = recentLogs.length - 1; index >= 0; index -= 1) {
+      const log = recentLogs[index]
+      if (toBigInt(log.args.roundId) === roundId) {
+        return log
+      }
+    }
 
-    return logs.at(-1) ?? null
+    const logs = await getRoundSettledLogs()
+    for (let index = logs.length - 1; index >= 0; index -= 1) {
+      const log = logs[index]
+      if (toBigInt(log.args.roundId) === roundId) {
+        return log
+      }
+    }
+
+    return null
   }
 
   if (fresh) {
@@ -589,6 +770,28 @@ async function getStakeWithdrawLogs() {
     event: STAKE_WITHDRAW_EVENT,
     fromBlock: env.scanStartBlock,
     toBlock: 'latest',
+  })
+}
+
+async function getStakeSnapshot() {
+  return withCache('snapshot:staking:balances', GLOBAL_LOG_CACHE_TTL_MS, async (): Promise<StakeSnapshot> => {
+    const [deposits, withdrawals] = await Promise.all([
+      getStakeDepositLogs(),
+      getStakeWithdrawLogs(),
+    ])
+    const balances = new Map<string, bigint>()
+
+    for (const log of deposits) {
+      const address = normalizeAddress(log.args.user)
+      balances.set(address, (balances.get(address) ?? 0n) + toBigInt(log.args.amount))
+    }
+
+    for (const log of withdrawals) {
+      const address = normalizeAddress(log.args.user)
+      balances.set(address, (balances.get(address) ?? 0n) - toBigInt(log.args.amount))
+    }
+
+    return { balances }
   })
 }
 
@@ -732,7 +935,7 @@ function formatCurrentRoundBlocks(blocks: CurrentRoundBlockState[]) {
 }
 
 async function getCurrentRoundBlocks(roundId: bigint) {
-  const latestBlock = await publicClient.getBlockNumber()
+  const latestBlock = await withRpcRetries(() => publicClient.getBlockNumber())
   const bootstrapLookback = 300n
 
   if (!currentRoundCache || currentRoundCache.roundId !== roundId) {
@@ -809,16 +1012,16 @@ export async function getCurrentRound(user?: string) {
 
   return withCache(cacheKey, 2_000, async () => {
     const [roundInfo, lootpotPool] = await Promise.all([
-      publicClient.readContract({
+      withRpcRetries(() => publicClient.readContract({
         address: CONTRACTS.gridMining,
         abi: gridMiningAbi,
         functionName: 'getCurrentRoundInfo',
-      }) as Promise<[bigint, bigint, bigint, bigint, bigint, boolean]>,
-      publicClient.readContract({
+      }) as Promise<[bigint, bigint, bigint, bigint, bigint, boolean]>),
+      withRpcRetries(() => publicClient.readContract({
         address: CONTRACTS.gridMining,
         abi: gridMiningAbi,
         functionName: 'lootpotPool',
-      }) as Promise<bigint>,
+      }) as Promise<bigint>),
     ])
 
     const [roundId, startTime, endTime, totalDeployed] = roundInfo
@@ -847,12 +1050,12 @@ export async function getCurrentRound(user?: string) {
 
     let userDeployed = 0n
     if (user && isAddress(user)) {
-      const minerInfo = await publicClient.readContract({
+      const minerInfo = await withRpcRetries(() => publicClient.readContract({
         address: CONTRACTS.gridMining,
         abi: gridMiningAbi,
         functionName: 'getMinerInfo',
         args: [roundId, getAddress(user)],
-      }) as [bigint, bigint, boolean]
+      }) as Promise<[bigint, bigint, boolean]>)
       userDeployed = computeUserDeployed(minerInfo[0], minerInfo[1])
     }
 
@@ -923,18 +1126,18 @@ async function getRoundState(roundId: bigint) {
       roundView,
       settledLog,
     ] = await Promise.all([
-      publicClient.readContract({
+      withRpcRetries(() => publicClient.readContract({
         address: CONTRACTS.gridMining,
         abi: gridMiningAbi,
         functionName: 'rounds',
         args: [roundId],
-      }) as Promise<[bigint, bigint, bigint, bigint, bigint, number, Address, bigint, bigint, bigint, bigint, boolean, bigint]>,
-      publicClient.readContract({
+      }) as Promise<[bigint, bigint, bigint, bigint, bigint, number, Address, bigint, bigint, bigint, bigint, boolean, bigint]>),
+      withRpcRetries(() => publicClient.readContract({
         address: CONTRACTS.gridMining,
         abi: gridMiningAbi,
         functionName: 'getRound',
         args: [roundId],
-      }) as Promise<[bigint, bigint, bigint, bigint, number, Address, bigint, bigint, boolean]>,
+      }) as Promise<[bigint, bigint, bigint, bigint, number, Address, bigint, bigint, boolean]>),
       getRoundSettledLogForRound(roundId, recent),
     ])
 
@@ -1101,7 +1304,7 @@ export async function getRoundMiners(roundIdInput: string | number | bigint) {
 }
 
 export async function getRounds(page = 1, limit = 12, lootpotOnly = false) {
-  return withCache(`rounds:${page}:${limit}:${lootpotOnly ? 'lootpot' : 'all'}`, 15_000, async () => {
+  return withCache(`rounds:${page}:${limit}:${lootpotOnly ? 'lootpot' : 'all'}`, HEAVY_ROUTE_CACHE_TTL_MS, async () => {
     const status = await getProtocolStatus()
     if (!status.gameStarted || status.currentRoundId === 0n) {
       return {
@@ -1110,19 +1313,34 @@ export async function getRounds(page = 1, limit = 12, lootpotOnly = false) {
       }
     }
 
-    const logs = await getRoundSettledLogs()
+    if (!lootpotOnly) {
+      const total = Number(status.currentRoundId > 0n ? status.currentRoundId - 1n : 0n)
+      const pages = Math.max(1, Math.ceil(total / limit))
+      const startRound = total - ((page - 1) * limit)
+      const endRound = Math.max(startRound - limit + 1, 1)
+      const slice: number[] = []
 
-    let roundIds = logs.map((log) => Number(log.args.roundId))
-    if (lootpotOnly) {
-      roundIds = logs.filter((log) => toBigInt(log.args.lootpotAmount ?? 0n) > 0n).map((log) => Number(log.args.roundId))
+      for (let roundId = startRound; roundId >= endRound; roundId -= 1) {
+        if (roundId > 0) slice.push(roundId)
+      }
+
+      const rounds = await mapWithConcurrency(slice, 4, async (roundId) => getRound(roundId))
+      return {
+        rounds,
+        pagination: { page, limit, total, pages },
+      }
     }
+
+    const logs = await getRoundSettledLogs()
+    let roundIds = logs.map((log) => Number(log.args.roundId))
+    roundIds = logs.filter((log) => toBigInt(log.args.lootpotAmount ?? 0n) > 0n).map((log) => Number(log.args.roundId))
 
     roundIds = [...new Set(roundIds)].sort((a, b) => b - a)
     const total = roundIds.length
     const pages = Math.max(1, Math.ceil(total / limit))
     const slice = roundIds.slice((page - 1) * limit, page * limit)
 
-    const rounds = await Promise.all(slice.map((roundId) => getRound(roundId)))
+    const rounds = await mapWithConcurrency(slice, 4, async (roundId) => getRound(roundId))
     return {
       rounds,
       pagination: { page, limit, total, pages },
@@ -1266,14 +1484,14 @@ export async function getCopilotContext(lookback = 1000) {
 }
 
 export async function getTreasuryStats() {
-  return withCache('treasury-stats', 15_000, async () => {
+  return withCache('treasury-stats', HEAVY_ROUTE_CACHE_TTL_MS, async () => {
     const status = await getProtocolStatus()
     const [stats, vaultLogs, standaloneBurnLogs] = await Promise.all([
-      publicClient.readContract({
+      withRpcRetries(() => publicClient.readContract({
         address: CONTRACTS.treasury,
         abi: treasuryAbi,
         functionName: 'getStats',
-      }) as Promise<[bigint, bigint, bigint, bigint]>,
+      }) as Promise<[bigint, bigint, bigint, bigint]>),
       status.currentRoundId === 0n ? Promise.resolve([]) : getVaultLogs(),
       getStandaloneBurnLogs(),
     ])
@@ -1301,7 +1519,7 @@ export async function getTreasuryStats() {
 }
 
 export async function getBuybacks(page = 1, limit = 12) {
-  return withCache(`buybacks:${page}:${limit}`, 30_000, async () => {
+  return withCache(`buybacks:${page}:${limit}`, HEAVY_ROUTE_CACHE_TTL_MS, async () => {
     const [buybackLogs, standaloneBurnLogs] = await Promise.all([
       getBuybackLogs(),
       getStandaloneBurnLogs(),
@@ -1360,19 +1578,19 @@ export async function getBuybacks(page = 1, limit = 12) {
 }
 
 export async function getStakingStats() {
-  return withCache('staking-stats', 30_000, async () => {
+  return withCache('staking-stats', HEAVY_ROUTE_CACHE_TTL_MS, async () => {
     const [globalStats, stakeTokenBalance, price, yieldLogs] = await Promise.all([
-      publicClient.readContract({
+      withRpcRetries(() => publicClient.readContract({
         address: CONTRACTS.staking,
         abi: stakingAbi,
         functionName: 'getGlobalStats',
-      }) as Promise<[bigint, bigint, bigint]>,
-      publicClient.readContract({
+      }) as Promise<[bigint, bigint, bigint]>),
+      withRpcRetries(() => publicClient.readContract({
         address: CONTRACTS.loot,
         abi: lootAbi,
         functionName: 'balanceOf',
         args: [CONTRACTS.staking],
-      }) as Promise<bigint>,
+      }) as Promise<bigint>),
       getLootPrice(),
       getYieldDistributedLogs(),
     ])
@@ -1406,18 +1624,18 @@ export async function getStakingStats() {
 export async function getUserStake(address: Address) {
   return withCache(`user-stake:${address}`, 10_000, async () => {
     const [stakeInfo, pendingRewards] = await Promise.all([
-      publicClient.readContract({
+      withRpcRetries(() => publicClient.readContract({
         address: CONTRACTS.staking,
         abi: stakingAbi,
         functionName: 'getStakeInfo',
         args: [address],
-      }) as Promise<[bigint, bigint, bigint, bigint, bigint, bigint, boolean]>,
-      publicClient.readContract({
+      }) as Promise<[bigint, bigint, bigint, bigint, bigint, bigint, boolean]>),
+      withRpcRetries(() => publicClient.readContract({
         address: CONTRACTS.staking,
         abi: stakingAbi,
         functionName: 'getPendingRewards',
         args: [address],
-      }) as Promise<bigint>,
+      }) as Promise<bigint>),
     ])
 
     return {
@@ -1438,18 +1656,18 @@ export async function getUserStake(address: Address) {
 export async function getUserRewards(address: Address) {
   return withCache(`user-rewards:${address}`, 2_000, async () => {
     const [pending, pendingLoot] = await Promise.all([
-      publicClient.readContract({
+      withRpcRetries(() => publicClient.readContract({
         address: CONTRACTS.gridMining,
         abi: gridMiningAbi,
         functionName: 'getTotalPendingRewards',
         args: [address],
-      }) as Promise<[bigint, bigint, bigint, bigint]>,
-      publicClient.readContract({
+      }) as Promise<[bigint, bigint, bigint, bigint]>),
+      withRpcRetries(() => publicClient.readContract({
         address: CONTRACTS.gridMining,
         abi: gridMiningAbi,
         functionName: 'getPendingLOOT',
         args: [address],
-      }) as Promise<[bigint, bigint, bigint]>,
+      }) as Promise<[bigint, bigint, bigint]>),
     ])
 
     const pendingEth = pending[0]
@@ -1574,39 +1792,64 @@ export async function getUserHistory(address: Address, limit = 100, roundIdFilte
     )
       .slice(0, safeLimit)
 
-    const history = await mapWithConcurrency(ordered, USER_HISTORY_CONCURRENCY, async (log) => {
-      const roundId = toBigInt(log.args.roundId)
-      const round = await getRound(roundId)
-      const miners = await getRoundMiners(roundId)
-      const blockMask = toBigInt(log.args.blockMask)
-      const totalAmount = toBigInt(log.args.totalAmount)
-      const wonWinningBlock = decodeBlockMask(blockMask).includes(round.winningBlock)
-      const userMiner = miners.miners.find((miner) => safeAddressEq(miner.address, address))
-      const ethWon = userMiner ? BigInt(userMiner.ethReward) : 0n
-      const lootWon = userMiner ? BigInt(userMiner.lootReward) : 0n
-      const pnl = Number(formatEther(ethWon)) - Number(formatEther(totalAmount))
-      const timestamp = await getBlockTimestampMs(getLogBlockNumber(log))
+    const roundCache = new Map<bigint, Promise<Awaited<ReturnType<typeof getRound>>>>()
+    const minerCache = new Map<bigint, Promise<Awaited<ReturnType<typeof getRoundMiners>>>>()
+    const loadRound = (roundId: bigint) => {
+      const cached = roundCache.get(roundId)
+      if (cached) return cached
+      const promise = getRound(roundId)
+      roundCache.set(roundId, promise)
+      return promise
+    }
+    const loadRoundMiners = (roundId: bigint) => {
+      const cached = minerCache.get(roundId)
+      if (cached) return cached
+      const promise = getRoundMiners(roundId)
+      minerCache.set(roundId, promise)
+      return promise
+    }
 
-      return {
-        roundId: Number(roundId),
-        totalAmount: totalAmount.toString(),
-        blockMask: blockMask.toString(),
-        txHash: log.transactionHash,
-        isAutoMine: log.eventName === 'DeployedFor',
-        timestamp: new Date(timestamp).toISOString(),
-        roundResult: {
-          settled: true,
-          wonWinningBlock,
-          lootpotHit: BigInt(round.lootpotAmount) > 0n,
-          winningBlock: round.winningBlock,
-          ethWon: ethWon.toString(),
-          ethWonFormatted: etherString(ethWon),
-          lootWon: lootWon.toString(),
-          lootWonFormatted: etherString(lootWon),
-          pnl: pnl.toString(),
-        },
+    const history = (await mapWithConcurrency(ordered, USER_HISTORY_CONCURRENCY, async (log) => {
+      try {
+        const roundId = toBigInt(log.args.roundId)
+        const [round, miners, timestamp] = await Promise.all([
+          loadRound(roundId),
+          loadRoundMiners(roundId),
+          getBlockTimestampMs(getLogBlockNumber(log)),
+        ])
+        const blockMask = toBigInt(log.args.blockMask)
+        const totalAmount = toBigInt(log.args.totalAmount)
+        const wonWinningBlock = decodeBlockMask(blockMask).includes(round.winningBlock)
+        const userMiner = miners.miners.find((miner) => safeAddressEq(miner.address, address))
+        const ethWon = userMiner ? BigInt(userMiner.ethReward) : 0n
+        const lootWon = userMiner ? BigInt(userMiner.lootReward) : 0n
+        const pnl = Number(formatEther(ethWon)) - Number(formatEther(totalAmount))
+
+        return {
+          roundId: Number(roundId),
+          totalAmount: totalAmount.toString(),
+          blockMask: blockMask.toString(),
+          txHash: log.transactionHash,
+          isAutoMine: log.eventName === 'DeployedFor',
+          timestamp: new Date(timestamp).toISOString(),
+          roundResult: {
+            settled: true,
+            wonWinningBlock,
+            lootpotHit: BigInt(round.lootpotAmount) > 0n,
+            winningBlock: round.winningBlock,
+            ethWon: ethWon.toString(),
+            ethWonFormatted: etherString(ethWon),
+            lootWon: lootWon.toString(),
+            lootWonFormatted: etherString(lootWon),
+            pnl: pnl.toString(),
+          },
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        console.warn(`[user-history] skipped ${log.transactionHash} for ${address}: ${message}`)
+        return null
       }
-    })
+    })).filter((entry) => entry !== null)
 
     const totals = history.reduce((acc, entry) => {
       acc.totalETHWon += BigInt(entry.roundResult.ethWon)
@@ -1638,28 +1881,28 @@ export async function getUserHistory(address: Address, limit = 100, roundIdFilte
 }
 
 export async function getLockStats() {
-  return withCache('lock-stats', 15_000, async () => {
+  return withCache('lock-stats', HEAVY_ROUTE_CACHE_TTL_MS, async () => {
     const [totalLockedResult, totalWeightResult, totalNotifiedResult, totalClaimedResult, snapshotResult] = await Promise.allSettled([
-      publicClient.readContract({
+      withRpcRetries(() => publicClient.readContract({
         address: CONTRACTS.lootLocker,
         abi: LOOT_LOCKER_READ_ABI,
         functionName: 'totalLocked',
-      }) as Promise<bigint>,
-      publicClient.readContract({
+      }) as Promise<bigint>),
+      withRpcRetries(() => publicClient.readContract({
         address: CONTRACTS.lootLocker,
         abi: LOOT_LOCKER_READ_ABI,
         functionName: 'totalWeight',
-      }) as Promise<bigint>,
-      publicClient.readContract({
+      }) as Promise<bigint>),
+      withRpcRetries(() => publicClient.readContract({
         address: CONTRACTS.lockerRewards,
         abi: LOCKER_REWARDS_READ_ABI,
         functionName: 'totalNotified',
-      }) as Promise<bigint>,
-      publicClient.readContract({
+      }) as Promise<bigint>),
+      withRpcRetries(() => publicClient.readContract({
         address: CONTRACTS.lockerRewards,
         abi: LOCKER_REWARDS_READ_ABI,
         functionName: 'totalClaimed',
-      }) as Promise<bigint>,
+      }) as Promise<bigint>),
       getLockerSnapshot(),
     ])
 
@@ -1688,7 +1931,7 @@ export async function getLockStats() {
 }
 
 export async function getLockDistributions(page = 1, limit = 12) {
-  return withCache(`lock-distributions:${page}:${limit}`, 15_000, async () => {
+  return withCache(`lock-distributions:${page}:${limit}`, HEAVY_ROUTE_CACHE_TTL_MS, async () => {
     const safePage = Number.isFinite(page) ? Math.max(1, Math.floor(page)) : 1
     const safeLimit = Number.isFinite(limit) ? Math.max(1, Math.min(Math.floor(limit), 100)) : 12
 
@@ -1743,7 +1986,7 @@ export async function getLockDistributions(page = 1, limit = 12) {
 }
 
 export async function getLeaderboardLockers(limit = 12) {
-  return withCache(`leaderboard-lockers:${limit}`, 30_000, async () => {
+  return withCache(`leaderboard-lockers:${limit}`, HEAVY_ROUTE_CACHE_TTL_MS, async () => {
     const snapshot = await getLockerSnapshot()
     const lockers = [...snapshot.userLocked.entries()]
       .filter(([, locked]) => locked > 0n)
@@ -1765,19 +2008,14 @@ export async function getLeaderboardLockers(limit = 12) {
 }
 
 export async function getLeaderboardMiners(limit = 12) {
-  return withCache(`leaderboard-miners:${limit}`, 30_000, async () => {
+  return withCache(`leaderboard-miners:${limit}`, HEAVY_ROUTE_CACHE_TTL_MS, async () => {
     const status = await getProtocolStatus()
     if (!status.gameStarted || status.currentRoundId === 0n) {
       return { period: 'all', miners: [], deployers: [] }
     }
 
-    const logs = await getAllDeploymentLogs()
-    const totals = new Map<string, bigint>()
-    for (const log of logs) {
-      const address = normalizeAddress(log.args.user)
-      totals.set(address, (totals.get(address) ?? 0n) + toBigInt(log.args.totalAmount))
-    }
-    const deployers = [...totals.entries()]
+    const snapshot = await getDeploymentSnapshot()
+    const deployers = [...snapshot.totalsByUser.entries()]
         .sort((a, b) => (b[1] > a[1] ? 1 : -1))
         .slice(0, limit)
         .map(([address, totalDeployed]) => ({
@@ -1796,21 +2034,9 @@ export async function getLeaderboardMiners(limit = 12) {
 }
 
 export async function getLeaderboardStakers(limit = 12) {
-  return withCache(`leaderboard-stakers:${limit}`, 30_000, async () => {
-    const [deposits, withdrawals] = await Promise.all([
-      getStakeDepositLogs(),
-      getStakeWithdrawLogs(),
-    ])
-    const balances = new Map<string, bigint>()
-    for (const log of deposits) {
-      const address = normalizeAddress(log.args.user)
-      balances.set(address, (balances.get(address) ?? 0n) + toBigInt(log.args.amount))
-    }
-    for (const log of withdrawals) {
-      const address = normalizeAddress(log.args.user)
-      balances.set(address, (balances.get(address) ?? 0n) - toBigInt(log.args.amount))
-    }
-    const stakers = [...balances.entries()]
+  return withCache(`leaderboard-stakers:${limit}`, HEAVY_ROUTE_CACHE_TTL_MS, async () => {
+    const snapshot = await getStakeSnapshot()
+    const stakers = [...snapshot.balances.entries()]
         .filter(([, balance]) => balance > 0n)
         .sort((a, b) => (b[1] > a[1] ? 1 : -1))
         .slice(0, limit)
@@ -1827,7 +2053,7 @@ export async function getLeaderboardStakers(limit = 12) {
 }
 
 export async function getLeaderboardEarners(limit = 12) {
-  return withCache(`leaderboard-earners:${limit}`, 30_000, async () => {
+  return withCache(`leaderboard-earners:${limit}`, HEAVY_ROUTE_CACHE_TTL_MS, async () => {
     const status = await getProtocolStatus()
     if (!status.gameStarted || status.currentRoundId === 0n) {
       return {
@@ -1838,10 +2064,18 @@ export async function getLeaderboardEarners(limit = 12) {
 
     const checkpointLogs = await getCheckpointLogs()
     const users = [...new Set(checkpointLogs.map((log) => normalizeAddress(log.args.user)))]
-    const rewards = await Promise.all(users.map(async (address) => ({
-      address,
-      rewards: await getUserRewards(address),
-    })))
+    const rewards = (await mapWithConcurrency(users, LEADERBOARD_EARNERS_CONCURRENCY, async (address) => {
+      try {
+        return {
+          address,
+          rewards: await getUserRewards(address),
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        console.warn(`[leaderboard-earners] skipped ${address}: ${message}`)
+        return null
+      }
+    })).filter((entry) => entry !== null)
 
     const earners = rewards
         .map(({ address, rewards }) => ({
@@ -1860,6 +2094,32 @@ export async function getLeaderboardEarners(limit = 12) {
       pagination: { page: 1, limit, total: earners.length, pages: 1 },
     }
   })
+}
+
+export async function warmProtocolCaches() {
+  await Promise.allSettled([
+    getProtocolStatus(),
+    getRoundSettledLogs(),
+    getRecentRoundSettledLogs(),
+    getDeploymentSnapshot(),
+    getStakeSnapshot(),
+    getCheckpointLogs(),
+    getLockerSnapshot(),
+    getLockRewardNotifiedLogs(),
+    getVaultLogs(),
+    getStandaloneBurnLogs(),
+  ])
+
+  await Promise.allSettled([
+    getStats(),
+    getRounds(1, 12, false),
+    getLeaderboardMiners(12),
+    getLeaderboardStakers(12),
+    getLeaderboardLockers(12),
+    getLeaderboardEarners(12),
+    getLockDistributions(1, 12),
+    getLockStats(),
+  ])
 }
 
 export async function getLatestRoundTransition() {
