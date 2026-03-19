@@ -44,11 +44,45 @@ create table if not exists agent_recent_rounds (
   primary key (wallet_address, round_id)
 );
 
+create table if not exists agent_treasury_events (
+  wallet_address text not null,
+  tx_hash text not null,
+  log_index integer not null,
+  event_type text not null,
+  loot_amount numeric(38,18) not null default 0,
+  block_number bigint not null,
+  to_address text,
+  event_timestamp timestamptz,
+  created_at timestamptz not null default now(),
+  primary key (wallet_address, tx_hash, log_index)
+);
+
 create index if not exists idx_agent_recent_rounds_wallet_round
   on agent_recent_rounds(wallet_address, round_id desc);
 
 create index if not exists idx_agent_wallet_stats_last_processed_round
   on agent_wallet_stats(last_processed_round);
+
+create index if not exists idx_agent_treasury_events_wallet_block
+  on agent_treasury_events(wallet_address, block_number desc);
+
+create index if not exists idx_agent_treasury_events_wallet_time
+  on agent_treasury_events(wallet_address, event_timestamp desc);
+
+alter table agent_wallet_stats
+  add column if not exists total_burned_loot numeric(38,18) not null default 0;
+
+alter table agent_wallet_stats
+  add column if not exists total_rebalanced_loot numeric(38,18) not null default 0;
+
+alter table agent_wallet_stats
+  add column if not exists total_burn_events integer not null default 0;
+
+alter table agent_wallet_stats
+  add column if not exists total_rebalance_events integer not null default 0;
+
+alter table agent_wallet_stats
+  add column if not exists last_treasury_processed_block bigint not null default 0;
 `
 
 let agentStatsPool: Pool | null = null
@@ -94,4 +128,3 @@ export async function closeAgentStatsPool() {
   agentStatsPool = null
   await pool.end()
 }
-

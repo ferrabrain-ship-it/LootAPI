@@ -1,7 +1,8 @@
 import type { PoolClient } from 'pg'
-import { formatEther, getAddress, parseEther, type Address } from 'viem'
+import { formatEther, getAddress, parseAbiItem, parseEther, type Address } from 'viem'
 import { CONTRACTS } from '../config/contracts.js'
 import { env } from '../config/env.js'
+import { publicClient } from '../lib/client.js'
 import { getAgentStatsPool } from '../lib/agentStatsDb.js'
 import { decodeBlockMask, safeAddressEq, toBigInt } from '../lib/format.js'
 import { getAllDeploymentLogs, getRound, getRoundMiners, type DeploymentLog } from './protocol.js'
@@ -26,6 +27,11 @@ interface StoredAgentWalletStatsRow {
   net_roi: string
   total_rounds_won_eth: string
   total_loot_value_eth: string
+  total_burned_loot: string
+  total_rebalanced_loot: string
+  total_burn_events: number
+  total_rebalance_events: number
+  last_treasury_processed_block: string
   last_active_at: Date | string | null
   last_processed_round: string
   updated_at: Date | string
@@ -46,6 +52,17 @@ interface StoredAgentRecentRoundRow {
   outcome: string
   mode: string
   round_timestamp: Date | string | null
+}
+
+interface StoredAgentTreasuryEventRow {
+  wallet_address: string
+  tx_hash: string
+  log_index: number
+  event_type: 'burn' | 'rebalance'
+  loot_amount: string
+  block_number: string
+  to_address: string | null
+  event_timestamp: Date | string | null
 }
 
 interface EnrichedAgentRound {
@@ -84,6 +101,15 @@ export interface AgentStatsApiRound {
   minutesAgo: number
 }
 
+export interface AgentStatsApiTreasuryEvent {
+  type: 'burn' | 'rebalance'
+  txHash: string
+  blockNumber: number
+  timestamp: string | null
+  minutesAgo: number
+  lootAmount: number
+}
+
 export interface AgentStatsApiResponse {
   walletAddress: string
   status: 'syncing' | 'ready' | 'error'
@@ -104,6 +130,11 @@ export interface AgentStatsApiResponse {
   worstRoundEth: number
   averageBetEth: number
   lastActiveMinutes: number
+  burnedLoot: number
+  rebalancedLoot: number
+  burnEvents: number
+  rebalanceEvents: number
+  treasuryEvents: AgentStatsApiTreasuryEvent[]
   recentRounds: AgentStatsApiRound[]
 }
 
@@ -112,6 +143,11 @@ const AGENT_STATS_RECENT_DEFAULT = 12
 const AGENT_STATS_RECENT_STORE_LIMIT = 80
 const AGENT_STATS_RECENT_MAX_LIMIT = 80
 const AGENT_STATS_SYNC_CONCURRENCY = 6
+const AGENT_TREASURY_EVENTS_RECENT_DEFAULT = 10
+const AGENT_TREASURY_EVENTS_MAX_LIMIT = 30
+const TRANSFER_EVENT = parseAbiItem('event Transfer(address indexed from, address indexed to, uint256 value)')
+const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000'
+const LOG_SCAN_BLOCK_SPAN = 20_000n
 
 declare global {
   // eslint-disable-next-line no-var
@@ -297,10 +333,227 @@ function mapRecentRow(row: StoredAgentRecentRoundRow): AgentStatsApiRound {
   }
 }
 
+function mapTreasuryRow(row: StoredAgentTreasuryEventRow): AgentStatsApiTreasuryEvent {
+  const timestamp = toIsoString(row.event_timestamp)
+
+  return {
+    type: row.event_type,
+    txHash: row.tx_hash,
+    blockNumber: Number(row.block_number),
+    timestamp,
+    minutesAgo: relativeMinutes(timestamp),
+    lootAmount: numericToNumber(row.loot_amount),
+  }
+}
+
+interface TreasurySyncSnapshot {
+  burnedLootWei: bigint
+  rebalancedLootWei: bigint
+  burnEvents: number
+  rebalanceEvents: number
+  lastProcessedBlock: bigint
+}
+
+interface WalletTransferLog {
+  transactionHash: `0x${string}`
+  blockNumber: bigint
+  logIndex: number | bigint
+  args: {
+    from: Address
+    to: Address
+    value: bigint
+  }
+}
+
+async function getWalletLootTransferLogs(walletAddress: Address, fromBlockExclusive: bigint) {
+  const latestBlock = await publicClient.getBlockNumber()
+  const startBlock = fromBlockExclusive + 1n > env.scanStartBlock
+    ? fromBlockExclusive + 1n
+    : env.scanStartBlock
+
+  if (startBlock > latestBlock) {
+    return { logs: [] as WalletTransferLog[], latestBlock }
+  }
+
+  const logs: WalletTransferLog[] = []
+  let cursor = startBlock
+
+  while (cursor <= latestBlock) {
+    const toBlock = cursor + LOG_SCAN_BLOCK_SPAN > latestBlock
+      ? latestBlock
+      : cursor + LOG_SCAN_BLOCK_SPAN
+
+    const chunk = await publicClient.getLogs({
+      address: CONTRACTS.loot,
+      event: TRANSFER_EVENT,
+      args: { from: walletAddress },
+      fromBlock: cursor,
+      toBlock,
+    }) as WalletTransferLog[]
+
+    logs.push(...chunk)
+    cursor = toBlock + 1n
+  }
+
+  logs.sort((left, right) => {
+    if (left.blockNumber === right.blockNumber) {
+      return Number(left.logIndex) - Number(right.logIndex)
+    }
+    return left.blockNumber > right.blockNumber ? 1 : -1
+  })
+
+  return {
+    logs,
+    latestBlock,
+  }
+}
+
+async function loadTreasuryRows(
+  client: PoolClient,
+  walletAddress: Address,
+  limit = AGENT_TREASURY_EVENTS_RECENT_DEFAULT
+) {
+  const safeLimit = Math.max(1, Math.min(Math.floor(limit), AGENT_TREASURY_EVENTS_MAX_LIMIT))
+  const result = await client.query<StoredAgentTreasuryEventRow>(
+    `
+      select *
+      from agent_treasury_events
+      where wallet_address = $1
+      order by block_number desc, log_index desc
+      limit $2
+    `,
+    [walletAddress.toLowerCase(), safeLimit]
+  )
+
+  return result.rows
+}
+
+async function syncAgentTreasuryEvents(
+  client: PoolClient,
+  walletAddress: Address,
+  existing: StoredAgentWalletStatsRow | null
+): Promise<TreasurySyncSnapshot> {
+  const currentBurnedLootWei = existing ? parseNumericToWei(existing.total_burned_loot) : 0n
+  const currentRebalancedLootWei = existing ? parseNumericToWei(existing.total_rebalanced_loot) : 0n
+  const currentBurnEvents = existing?.total_burn_events ?? 0
+  const currentRebalanceEvents = existing?.total_rebalance_events ?? 0
+  const currentLastProcessedBlock = existing ? BigInt(existing.last_treasury_processed_block) : 0n
+  const normalizedWallet = walletAddress.toLowerCase()
+
+  const { logs, latestBlock } = await getWalletLootTransferLogs(walletAddress, currentLastProcessedBlock)
+
+  if (logs.length === 0) {
+    return {
+      burnedLootWei: currentBurnedLootWei,
+      rebalancedLootWei: currentRebalancedLootWei,
+      burnEvents: currentBurnEvents,
+      rebalanceEvents: currentRebalanceEvents,
+      lastProcessedBlock: latestBlock > currentLastProcessedBlock ? latestBlock : currentLastProcessedBlock,
+    }
+  }
+
+  const blockTimestampMap = new Map<bigint, string>()
+  const rowsToInsert: Array<{
+    walletAddress: string
+    txHash: string
+    logIndex: number
+    eventType: 'burn' | 'rebalance'
+    lootAmount: string
+    blockNumber: string
+    toAddress: string
+    eventTimestamp: string
+  }> = []
+
+  let nextBurnedLootWei = currentBurnedLootWei
+  let nextRebalancedLootWei = currentRebalancedLootWei
+  let nextBurnEvents = currentBurnEvents
+  let nextRebalanceEvents = currentRebalanceEvents
+
+  for (const log of logs) {
+    const valueWei = toBigInt(log.args.value)
+    if (valueWei <= 0n) {
+      continue
+    }
+
+    const toAddress = getAddress(log.args.to).toLowerCase()
+    const eventType: 'burn' | 'rebalance' = toAddress === ZERO_ADDRESS ? 'burn' : 'rebalance'
+
+    if (!blockTimestampMap.has(log.blockNumber)) {
+      const block = await publicClient.getBlock({ blockNumber: log.blockNumber })
+      blockTimestampMap.set(log.blockNumber, new Date(Number(block.timestamp) * 1000).toISOString())
+    }
+
+    rowsToInsert.push({
+      walletAddress: normalizedWallet,
+      txHash: log.transactionHash.toLowerCase(),
+      logIndex: Number(log.logIndex),
+      eventType,
+      lootAmount: formatEther(valueWei),
+      blockNumber: log.blockNumber.toString(),
+      toAddress,
+      eventTimestamp: blockTimestampMap.get(log.blockNumber) ?? new Date().toISOString(),
+    })
+
+    if (eventType === 'burn') {
+      nextBurnedLootWei += valueWei
+      nextBurnEvents += 1
+    } else {
+      nextRebalancedLootWei += valueWei
+      nextRebalanceEvents += 1
+    }
+  }
+
+  if (rowsToInsert.length > 0) {
+    const values: unknown[] = []
+    const placeholders = rowsToInsert.map((row, index) => {
+      const offset = index * 8
+      values.push(
+        row.walletAddress,
+        row.txHash,
+        row.logIndex,
+        row.eventType,
+        row.lootAmount,
+        row.blockNumber,
+        row.toAddress,
+        row.eventTimestamp
+      )
+
+      return `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6}, $${offset + 7}, $${offset + 8})`
+    })
+
+    await client.query(
+      `
+        insert into agent_treasury_events (
+          wallet_address,
+          tx_hash,
+          log_index,
+          event_type,
+          loot_amount,
+          block_number,
+          to_address,
+          event_timestamp
+        )
+        values ${placeholders.join(', ')}
+        on conflict (wallet_address, tx_hash, log_index) do nothing
+      `,
+      values
+    )
+  }
+
+  return {
+    burnedLootWei: nextBurnedLootWei,
+    rebalancedLootWei: nextRebalancedLootWei,
+    burnEvents: nextBurnEvents,
+    rebalanceEvents: nextRebalanceEvents,
+    lastProcessedBlock: latestBlock > currentLastProcessedBlock ? latestBlock : currentLastProcessedBlock,
+  }
+}
+
 function buildApiResponse(
   walletAddress: Address,
   row: StoredAgentWalletStatsRow | null,
-  recentRows: StoredAgentRecentRoundRow[]
+  recentRows: StoredAgentRecentRoundRow[],
+  treasuryRows: StoredAgentTreasuryEventRow[]
 ): AgentStatsApiResponse | null {
   if (!row) {
     return null
@@ -329,6 +582,11 @@ function buildApiResponse(
     worstRoundEth: numericToNumber(row.worst_round_eth),
     averageBetEth: numericToNumber(row.average_bet_eth),
     lastActiveMinutes: relativeMinutes(lastActiveAt),
+    burnedLoot: numericToNumber(row.total_burned_loot),
+    rebalancedLoot: numericToNumber(row.total_rebalanced_loot),
+    burnEvents: row.total_burn_events,
+    rebalanceEvents: row.total_rebalance_events,
+    treasuryEvents: treasuryRows.map(mapTreasuryRow),
     recentRounds: recentRows.map(mapRecentRow),
   }
 }
@@ -436,18 +694,37 @@ async function syncAgentWalletStats(walletAddress: Address, logger: Logger = con
 
     const walletLogs = allLogs.filter((log) => safeAddressEq(log.args.user, address))
     const existing = await loadStatsRow(client, address)
+    const treasurySnapshot = await syncAgentTreasuryEvents(client, address, existing)
 
     if (walletLogs.length === 0) {
       await client.query(
         `
           insert into agent_wallet_stats (
             wallet_address,
+            total_burned_loot,
+            total_rebalanced_loot,
+            total_burn_events,
+            total_rebalance_events,
+            last_treasury_processed_block,
             updated_at
-          ) values ($1, now())
+          ) values ($1, $2, $3, $4, $5, $6, now())
           on conflict (wallet_address) do update
-          set updated_at = now()
+          set
+            total_burned_loot = excluded.total_burned_loot,
+            total_rebalanced_loot = excluded.total_rebalanced_loot,
+            total_burn_events = excluded.total_burn_events,
+            total_rebalance_events = excluded.total_rebalance_events,
+            last_treasury_processed_block = excluded.last_treasury_processed_block,
+            updated_at = now()
         `,
-        [address.toLowerCase()]
+        [
+          address.toLowerCase(),
+          formatEther(treasurySnapshot.burnedLootWei),
+          formatEther(treasurySnapshot.rebalancedLootWei),
+          treasurySnapshot.burnEvents,
+          treasurySnapshot.rebalanceEvents,
+          Number(treasurySnapshot.lastProcessedBlock),
+        ]
       )
       await client.query('delete from agent_recent_rounds where wallet_address = $1', [address.toLowerCase()])
       return
@@ -460,6 +737,27 @@ async function syncAgentWalletStats(walletAddress: Address, logger: Logger = con
 
     if (newLogs.length === 0 && existing) {
       await refreshCurrentValueFields(client, address, lootPriceNativeEth)
+      await client.query(
+        `
+          update agent_wallet_stats
+          set
+            total_burned_loot = $2,
+            total_rebalanced_loot = $3,
+            total_burn_events = $4,
+            total_rebalance_events = $5,
+            last_treasury_processed_block = $6,
+            updated_at = now()
+          where wallet_address = $1
+        `,
+        [
+          address.toLowerCase(),
+          formatEther(treasurySnapshot.burnedLootWei),
+          formatEther(treasurySnapshot.rebalancedLootWei),
+          treasurySnapshot.burnEvents,
+          treasurySnapshot.rebalanceEvents,
+          Number(treasurySnapshot.lastProcessedBlock),
+        ]
+      )
       return
     }
 
@@ -520,12 +818,18 @@ async function syncAgentWalletStats(walletAddress: Address, logger: Logger = con
           net_roi,
           total_rounds_won_eth,
           total_loot_value_eth,
+          total_burned_loot,
+          total_rebalanced_loot,
+          total_burn_events,
+          total_rebalance_events,
+          last_treasury_processed_block,
           last_active_at,
           last_processed_round,
           updated_at
         ) values (
           $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-          $11, $12, $13, $14, $15, $16, $17, $18, $19, now()
+          $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
+          $21, $22, $23, $24, now()
         )
         on conflict (wallet_address) do update set
           rounds_played = excluded.rounds_played,
@@ -544,6 +848,11 @@ async function syncAgentWalletStats(walletAddress: Address, logger: Logger = con
           net_roi = excluded.net_roi,
           total_rounds_won_eth = excluded.total_rounds_won_eth,
           total_loot_value_eth = excluded.total_loot_value_eth,
+          total_burned_loot = excluded.total_burned_loot,
+          total_rebalanced_loot = excluded.total_rebalanced_loot,
+          total_burn_events = excluded.total_burn_events,
+          total_rebalance_events = excluded.total_rebalance_events,
+          last_treasury_processed_block = excluded.last_treasury_processed_block,
           last_active_at = excluded.last_active_at,
           last_processed_round = excluded.last_processed_round,
           updated_at = now()
@@ -566,6 +875,11 @@ async function syncAgentWalletStats(walletAddress: Address, logger: Logger = con
         nextNetRoi.toString(),
         nextTotalRewardsEth.toString(),
         nextLootValueEth.toString(),
+        formatEther(treasurySnapshot.burnedLootWei),
+        formatEther(treasurySnapshot.rebalancedLootWei),
+        treasurySnapshot.burnEvents,
+        treasurySnapshot.rebalanceEvents,
+        Number(treasurySnapshot.lastProcessedBlock),
         latestActivity,
         nextLastProcessedRound,
       ]
@@ -649,7 +963,8 @@ export async function getAgentWalletStats(walletAddress: Address, recentLimit = 
   try {
     const statsRow = await loadStatsRow(client, address)
     const recentRows = await loadRecentRows(client, address, safeRecentLimit)
-    const snapshot = buildApiResponse(address, statsRow, recentRows)
+    const treasuryRows = await loadTreasuryRows(client, address, AGENT_TREASURY_EVENTS_RECENT_DEFAULT)
+    const snapshot = buildApiResponse(address, statsRow, recentRows, treasuryRows)
 
     if (!snapshot) {
       void triggerAgentWalletSync(address)
@@ -673,6 +988,11 @@ export async function getAgentWalletStats(walletAddress: Address, recentLimit = 
         worstRoundEth: 0,
         averageBetEth: 0,
         lastActiveMinutes: 0,
+        burnedLoot: 0,
+        rebalancedLoot: 0,
+        burnEvents: 0,
+        rebalanceEvents: 0,
+        treasuryEvents: [],
         recentRounds: [],
       }
     }
