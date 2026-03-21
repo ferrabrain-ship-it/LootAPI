@@ -33,6 +33,7 @@ import {
 import { getProfile, getProfilesBatch } from './services/profiles.js'
 import { runLootpotNotifierOnce } from './services/lootpotNotifier.js'
 import { createDiscordPriceWorker } from './services/discordPriceWorker.js'
+import { createDiscordMetricBotsWorker } from './services/discordMetricBotsWorker.js'
 
 const app = Fastify({ logger: true })
 let lootpotWorkerStopping = false
@@ -41,6 +42,7 @@ let cacheWarmTimer: NodeJS.Timeout | null = null
 let agentStatsWorkerStopping = false
 let agentStatsWorkerTimer: NodeJS.Timeout | null = null
 const discordPriceWorker = createDiscordPriceWorker({ logger: console })
+const discordMetricBotsWorker = createDiscordMetricBotsWorker({ logger: console })
 
 await app.register(cors, {
   origin: true,
@@ -332,17 +334,28 @@ async function startDiscordPriceWorker() {
   }
 }
 
+async function startDiscordMetricBotsWorker() {
+  if (!discordMetricBotsWorker.enabled) return
+  try {
+    await discordMetricBotsWorker.start()
+  } catch (error) {
+    app.log.error(error, '[discord-metric-bots-worker] failed to start')
+  }
+}
+
 process.on('SIGTERM', () => {
   stopLootpotWorker()
   stopAgentStatsWorker()
   stopCacheWarmer()
   void discordPriceWorker.stop()
+  void discordMetricBotsWorker.stop()
 })
 process.on('SIGINT', () => {
   stopLootpotWorker()
   stopAgentStatsWorker()
   stopCacheWarmer()
   void discordPriceWorker.stop()
+  void discordMetricBotsWorker.stop()
 })
 
 app.listen({ port: env.port, host: '0.0.0.0' })
@@ -352,6 +365,7 @@ app.listen({ port: env.port, host: '0.0.0.0' })
     startLootpotWorker()
     startAgentStatsWorker()
     void startDiscordPriceWorker()
+    void startDiscordMetricBotsWorker()
   })
   .catch((error) => {
     app.log.error(error)

@@ -14,7 +14,8 @@
     "worker:lootpot": "tsx src/jobs/lootpotNotifier.ts",
     "worker:lootpot:test": "LOOTPOT_WORKER_TEST=true tsx src/jobs/lootpotNotifier.ts",
     "worker:discord-price": "tsx src/jobs/discordPriceWorker.ts",
-    "worker:discord-price:once": "tsx src/jobs/discordPriceWorker.ts --once"
+    "worker:discord-price:once": "tsx src/jobs/discordPriceWorker.ts --once",
+    "worker:discord-metrics": "tsx src/jobs/discordMetricBotsWorker.ts"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.1",

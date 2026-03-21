@@ -56,6 +56,7 @@ CORS_ORIGIN=https://mineloot.app
 NEXT_PUBLIC_APP_URL=https://mineloot.app
 ENABLE_LOOTPOT_WORKER=false
 ENABLE_DISCORD_PRICE_WORKER=false
+ENABLE_DISCORD_METRIC_BOTS_WORKER=false
 RPC_URL_PRIMARY=https://mainnet.base.org
 RPC_URL_FALLBACK_1=https://base.llamarpc.com
 RPC_URL_FALLBACK_2=https://rpc.ankr.com/base
@@ -67,6 +68,14 @@ DISCORD_BOT_TOKEN=
 DISCORD_GUILD_ID=
 DISCORD_PRICE_POLL_INTERVAL_MS=600000
 DISCORD_PRICE_DATABASE_URL=
+DISCORD_METRIC_BOTS_GUILD_ID=
+DISCORD_CIRCULATING_BOT_TOKEN=
+DISCORD_BURNED_BOT_TOKEN=
+DISCORD_METRIC_BOTS_POLL_INTERVAL_MS=120000
+DISCORD_CIRCULATING_EMOJI=🪙
+DISCORD_BURNED_EMOJI=🔥
+DISCORD_CIRCULATING_STATUS=Circulating Supply
+DISCORD_BURNED_STATUS=Burned
 DISCORD_LOOTPOT_WEBHOOK_URL=
 DISCORD_BOT_ASSET_BASE_URL=https://mineloot.app
 DISCORD_LOOTPOT_EMOJI=🪙
@@ -156,8 +165,8 @@ ENABLE_DISCORD_PRICE_WORKER=true
 ```
 
 The worker updates:
-- bot nickname: `LOOT $<price> ↗/↘`
-- bot presence: `Watching 7d: +/-X.XX%` (or `24h: ...` if no DB snapshots)
+- bot nickname: `$<price> (↗/↘)`
+- bot presence: `Watching 24h: +/-X.XX%`
 
 If using snapshots DB, create this table first:
 
@@ -169,4 +178,37 @@ create table if not exists public.loot_price_snapshots (
 
 create index if not exists loot_price_snapshots_ts_desc_idx
   on public.loot_price_snapshots (ts desc);
+```
+
+## Discord metric bots worker (circulating + burned)
+
+Run two dedicated Discord bots that update nickname/status with live protocol metrics:
+
+```bash
+npm run worker:discord-metrics
+```
+
+Required environment variables:
+
+```env
+ENABLE_DISCORD_METRIC_BOTS_WORKER=true
+DISCORD_METRIC_BOTS_GUILD_ID=... # optional if DISCORD_GUILD_ID already set
+DISCORD_CIRCULATING_BOT_TOKEN=...
+DISCORD_BURNED_BOT_TOKEN=...
+DISCORD_METRIC_BOTS_POLL_INTERVAL_MS=120000
+```
+
+Optional branding:
+
+```env
+DISCORD_CIRCULATING_EMOJI=🪙
+DISCORD_BURNED_EMOJI=🔥
+DISCORD_CIRCULATING_STATUS=Circulating Supply
+DISCORD_BURNED_STATUS=Burned
+```
+
+You can run it inline on the API service too:
+
+```env
+ENABLE_DISCORD_METRIC_BOTS_WORKER=true
 ```
