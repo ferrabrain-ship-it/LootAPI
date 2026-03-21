@@ -42,16 +42,21 @@ function formatLootInteger(value: number) {
 }
 
 function buildNickname(metric: MetricKey, snapshot: MetricSnapshot) {
-  if (metric === 'circulating') {
-    return `${env.discordCirculatingEmoji} ${formatLootInteger(snapshot.circulatingLoot)}`
-  }
-  return `${env.discordBurnedEmoji} ${formatLootInteger(snapshot.burnedLoot)}`
+  const prefix = metric === 'circulating'
+    ? env.discordCirculatingEmoji.trim()
+    : env.discordBurnedEmoji.trim()
+  const value = metric === 'circulating'
+    ? formatLootInteger(snapshot.circulatingLoot)
+    : formatLootInteger(snapshot.burnedLoot)
+
+  return prefix ? `${prefix} ${value}` : value
 }
 
 function buildStatus(metric: MetricKey) {
-  return metric === 'circulating'
-    ? env.discordCirculatingStatus
-    : env.discordBurnedStatus
+  if (metric === 'circulating') {
+    return env.discordCirculatingStatus
+  }
+  return env.discordBurnedStatus
 }
 
 async function getMetricSnapshot(): Promise<MetricSnapshot> {
