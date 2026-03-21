@@ -18,6 +18,11 @@ type TickResult = {
   burnedNickname: string | null
 }
 
+function errorMessage(error: unknown) {
+  if (error instanceof Error) return error.message
+  return String(error)
+}
+
 function toLootNumber(valueWei: string | bigint | null | undefined) {
   try {
     const value = typeof valueWei === 'bigint' ? valueWei : BigInt(valueWei || '0')
@@ -79,8 +84,19 @@ async function applyMetricBot(
   const nickname = buildNickname(metric, snapshot)
   const statusLabel = buildStatus(metric)
 
-  const guild = await client.guilds.fetch(guildId)
-  const me = await guild.members.fetchMe()
+  let guild
+  try {
+    guild = await client.guilds.fetch(guildId)
+  } catch (error) {
+    throw new Error(`[${metric}] failed to fetch guild ${guildId}: ${errorMessage(error)}`)
+  }
+
+  let me
+  try {
+    me = await guild.members.fetchMe()
+  } catch (error) {
+    throw new Error(`[${metric}] failed to fetch bot member in guild ${guildId}: ${errorMessage(error)}`)
+  }
 
   try {
     if (me.nickname !== nickname) {
@@ -162,21 +178,43 @@ export function createDiscordMetricBotsWorker(options?: { logger?: Logger }) {
         let burnedNickname: string | null = null
 
         if (clients.has('circulating')) {
-          circulatingNickname = await applyMetricBot(
-            clients.get('circulating') as Client,
-            'circulating',
-            snapshot,
-            logger
-          )
+          try {
+            circulatingNickname = await applyMetricBot(
+              clients.get('circulating') as Client,
+              'circulating',
+              snapshot,
+              logger
+            )
+          } catch (error) {
+            logger.error(
+              {
+                metric: 'circulating',
+                guildId: env.discordMetricsGuildId,
+                error: errorMessage(error),
+              },
+              '[discord-metric-bots-worker] metric bot update failed'
+            )
+          }
         }
 
         if (clients.has('burned')) {
-          burnedNickname = await applyMetricBot(
-            clients.get('burned') as Client,
-            'burned',
-            snapshot,
-            logger
-          )
+          try {
+            burnedNickname = await applyMetricBot(
+              clients.get('burned') as Client,
+              'burned',
+              snapshot,
+              logger
+            )
+          } catch (error) {
+            logger.error(
+              {
+                metric: 'burned',
+                guildId: env.discordMetricsGuildId,
+                error: errorMessage(error),
+              },
+              '[discord-metric-bots-worker] metric bot update failed'
+            )
+          }
         }
 
         const result: TickResult = {
@@ -205,4 +243,3 @@ export function createDiscordMetricBotsWorker(options?: { logger?: Logger }) {
     stop,
   }
 }
-
