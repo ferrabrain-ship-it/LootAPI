@@ -32,6 +32,7 @@ import {
 } from './services/protocol.js'
 import { getProfile, getProfilesBatch } from './services/profiles.js'
 import { runLootpotNotifierOnce } from './services/lootpotNotifier.js'
+import { createDiscordPriceWorker } from './services/discordPriceWorker.js'
 
 const app = Fastify({ logger: true })
 let lootpotWorkerStopping = false
@@ -39,6 +40,7 @@ let lootpotWorkerTimer: NodeJS.Timeout | null = null
 let cacheWarmTimer: NodeJS.Timeout | null = null
 let agentStatsWorkerStopping = false
 let agentStatsWorkerTimer: NodeJS.Timeout | null = null
+const discordPriceWorker = createDiscordPriceWorker({ logger: console })
 
 await app.register(cors, {
   origin: true,
@@ -321,15 +323,26 @@ function startAgentStatsWorker() {
   void tick()
 }
 
+async function startDiscordPriceWorker() {
+  if (!discordPriceWorker.enabled) return
+  try {
+    await discordPriceWorker.start()
+  } catch (error) {
+    app.log.error(error, '[discord-price-worker] failed to start')
+  }
+}
+
 process.on('SIGTERM', () => {
   stopLootpotWorker()
   stopAgentStatsWorker()
   stopCacheWarmer()
+  void discordPriceWorker.stop()
 })
 process.on('SIGINT', () => {
   stopLootpotWorker()
   stopAgentStatsWorker()
   stopCacheWarmer()
+  void discordPriceWorker.stop()
 })
 
 app.listen({ port: env.port, host: '0.0.0.0' })
@@ -338,6 +351,7 @@ app.listen({ port: env.port, host: '0.0.0.0' })
     startCacheWarmer()
     startLootpotWorker()
     startAgentStatsWorker()
+    void startDiscordPriceWorker()
   })
   .catch((error) => {
     app.log.error(error)

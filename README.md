@@ -55,6 +55,7 @@ Use these Railway environment variables:
 CORS_ORIGIN=https://mineloot.app
 NEXT_PUBLIC_APP_URL=https://mineloot.app
 ENABLE_LOOTPOT_WORKER=false
+ENABLE_DISCORD_PRICE_WORKER=false
 RPC_URL_PRIMARY=https://mainnet.base.org
 RPC_URL_FALLBACK_1=https://base.llamarpc.com
 RPC_URL_FALLBACK_2=https://rpc.ankr.com/base
@@ -62,6 +63,10 @@ RPC_URL_FALLBACK_3=https://base-rpc.publicnode.com
 LOYALTY_SCAN_START_BLOCK=43103600
 SUPABASE_URL=
 SUPABASE_SERVICE_ROLE_KEY=
+DISCORD_BOT_TOKEN=
+DISCORD_GUILD_ID=
+DISCORD_PRICE_POLL_INTERVAL_MS=600000
+DISCORD_PRICE_DATABASE_URL=
 DISCORD_LOOTPOT_WEBHOOK_URL=
 DISCORD_BOT_ASSET_BASE_URL=https://mineloot.app
 DISCORD_LOOTPOT_EMOJI=🪙
@@ -117,4 +122,51 @@ For a one-shot validation run:
 
 ```bash
 npm run worker:lootpot:test
+```
+
+## Discord price bot worker
+
+You can run a Discord price-status bot from this same repo:
+
+```bash
+npm run worker:discord-price
+```
+
+Required environment variables:
+
+```env
+ENABLE_DISCORD_PRICE_WORKER=true
+DISCORD_BOT_TOKEN=...
+DISCORD_GUILD_ID=...
+DISCORD_PRICE_POLL_INTERVAL_MS=600000
+```
+
+Optional:
+
+```env
+# If set, stores hourly snapshots and computes a 7d change for status text.
+# If omitted, worker falls back to 24h change from DexScreener.
+DISCORD_PRICE_DATABASE_URL=...
+```
+
+You can also enable it inline with the API service (single Railway service):
+
+```env
+ENABLE_DISCORD_PRICE_WORKER=true
+```
+
+The worker updates:
+- bot nickname: `LOOT $<price> ↗/↘`
+- bot presence: `Watching 7d: +/-X.XX%` (or `24h: ...` if no DB snapshots)
+
+If using snapshots DB, create this table first:
+
+```sql
+create table if not exists public.loot_price_snapshots (
+  ts timestamptz not null default now(),
+  price_usd numeric(38,18) not null
+);
+
+create index if not exists loot_price_snapshots_ts_desc_idx
+  on public.loot_price_snapshots (ts desc);
 ```
