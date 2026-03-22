@@ -2,7 +2,7 @@
   "$schema": "https://railway.com/railway.schema.json",
   "builder": "RAILPACK",
   "deploy": {
-    "startCommand": "sh -lc 'PLAYWRIGHT_BROWSERS_PATH=/app/ms-playwright npm run start'",
+    "startCommand": "npm run start",
     "healthcheckPath": "/health",
     "restartPolicyType": "ON_FAILURE",
     "restartPolicyMaxRetries": 10

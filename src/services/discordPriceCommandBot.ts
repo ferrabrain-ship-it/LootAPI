@@ -8,6 +8,7 @@ import {
   GatewayIntentBits,
   type Message,
 } from 'discord.js'
+import { existsSync } from 'node:fs'
 import { chromium } from 'playwright'
 import { CONTRACTS } from '../config/contracts.js'
 import { env } from '../config/env.js'
@@ -75,6 +76,21 @@ const WINDOW_CONFIG: Record<string, OhlcvWindowConfig> = {
   '1d': { timeframe: 'day', aggregate: 1, limit: 90 },
   '7d': { timeframe: 'day', aggregate: 7, limit: 90 },
   '1w': { timeframe: 'day', aggregate: 7, limit: 90 },
+}
+
+const PLAYWRIGHT_BROWSERS_PATH_CANDIDATES = [
+  '/app/ms-playwright',
+  '/ms-playwright',
+  '/root/.cache/ms-playwright',
+]
+
+function ensurePlaywrightBrowsersPath() {
+  if (process.env.PLAYWRIGHT_BROWSERS_PATH?.trim()) return
+
+  const detected = PLAYWRIGHT_BROWSERS_PATH_CANDIDATES.find((path) => existsSync(path))
+  if (detected) {
+    process.env.PLAYWRIGHT_BROWSERS_PATH = detected
+  }
 }
 
 function numeric(value: unknown) {
@@ -406,6 +422,7 @@ async function buildQuickChartImage(candles: OhlcvPoint[], requestedWindow: stri
 }
 
 async function buildDexScreenerChartImage(pairUrl: string, requestedWindow: string, logger: Logger) {
+  ensurePlaywrightBrowsersPath()
   const embedUrl = buildDexScreenerEmbedUrl(pairUrl, requestedWindow)
   const browser = await chromium.launch({
     headless: true,
