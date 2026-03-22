@@ -480,6 +480,7 @@ async function respondPrice(message: Message, requestedWindow: string, logger: L
   const openUrl = pair.url ? decoratePairUrl(pair.url, requestedWindow) : 'https://dexscreener.com/base'
   let chartAttachment: AttachmentBuilder | null = null
   let renderSource: 'dexscreener' | 'quickchart' | 'openGraph' = 'openGraph'
+  let renderNote: string | null = null
 
   if (env.discordPriceCommandRenderMode === 'dexscreener' && pair.url) {
     try {
@@ -487,11 +488,13 @@ async function respondPrice(message: Message, requestedWindow: string, logger: L
       chartAttachment = new AttachmentBuilder(image, { name: 'loot-chart.png' })
       renderSource = 'dexscreener'
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      renderNote = `dex fail: ${message}`.slice(0, 80)
       logger.warn(
         {
           requestedWindow,
           pairUrl: pair.url,
-          error: error instanceof Error ? error.message : String(error),
+          error: message,
         },
         '[discord-price-command-bot] dexscreener screenshot failed; fallback to quickchart'
       )
@@ -537,7 +540,9 @@ async function respondPrice(message: Message, requestedWindow: string, logger: L
       { name: '6h', value: formatSignedPercent(change6h), inline: true },
       { name: '24h Volume', value: formatUsd(vol24h), inline: true },
     )
-    .setFooter({ text: `Requested by ${message.author.username} • render: ${renderSource}` })
+    .setFooter({
+      text: `Requested by ${message.author.username} • render: ${renderSource}${renderNote ? ` • ${renderNote}` : ''}`,
+    })
     .setTimestamp(new Date())
 
   if (chartAttachment) {
