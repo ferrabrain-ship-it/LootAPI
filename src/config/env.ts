@@ -17,6 +17,7 @@ export const env = {
   discordPriceDatabaseUrl: process.env.DISCORD_PRICE_DATABASE_URL || process.env.AGENT_STATS_DATABASE_URL || process.env.DATABASE_URL || '',
   discordPriceCommandBotToken: process.env.DISCORD_PRICE_COMMAND_BOT_TOKEN || '',
   discordPriceCommandAllowedGuildId: process.env.DISCORD_PRICE_COMMAND_ALLOWED_GUILD_ID || '',
+  discordPriceCommandAllowedChannelId: process.env.DISCORD_PRICE_COMMAND_ALLOWED_CHANNEL_ID || '',
   discordPriceCommandPrefix: (process.env.DISCORD_PRICE_COMMAND_PREFIX || 'price').trim().toLowerCase(),
   discordMetricsGuildId: process.env.DISCORD_METRIC_BOTS_GUILD_ID || process.env.DISCORD_GUILD_ID || '',
   discordCirculatingBotToken: process.env.DISCORD_CIRCULATING_BOT_TOKEN || '',

@@ -173,6 +173,7 @@ export function createDiscordPriceCommandBot(options?: { logger?: Logger }) {
   const enabled = env.enableDiscordPriceCommandBot
   const token = env.discordPriceCommandBotToken.trim()
   const allowedGuildId = env.discordPriceCommandAllowedGuildId.trim()
+  const allowedChannelId = env.discordPriceCommandAllowedChannelId.trim()
   let started = false
   let stopping = false
 
@@ -189,6 +190,7 @@ export function createDiscordPriceCommandBot(options?: { logger?: Logger }) {
     if (message.author.bot) return
     if (!message.inGuild()) return
     if (allowedGuildId && message.guildId !== allowedGuildId) return
+    if (allowedChannelId && message.channelId !== allowedChannelId) return
 
     const requestedWindow = parseCommandWindow(message.content)
     if (!requestedWindow) return
@@ -229,6 +231,7 @@ export function createDiscordPriceCommandBot(options?: { logger?: Logger }) {
     logger.info(
       {
         allowedGuildId: allowedGuildId || null,
+        allowedChannelId: allowedChannelId || null,
         prefix: env.discordPriceCommandPrefix || 'price',
       },
       '[discord-price-command-bot] ready'
@@ -241,4 +244,3 @@ export function createDiscordPriceCommandBot(options?: { logger?: Logger }) {
     stop,
   }
 }
-
