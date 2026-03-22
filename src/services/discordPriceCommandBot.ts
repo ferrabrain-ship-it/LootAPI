@@ -479,11 +479,13 @@ async function respondPrice(message: Message, requestedWindow: string, logger: L
   const title = `LOOT / USD • ${requestedWindow.toUpperCase()}`
   const openUrl = pair.url ? decoratePairUrl(pair.url, requestedWindow) : 'https://dexscreener.com/base'
   let chartAttachment: AttachmentBuilder | null = null
+  let renderSource: 'dexscreener' | 'quickchart' | 'openGraph' = 'openGraph'
 
   if (env.discordPriceCommandRenderMode === 'dexscreener' && pair.url) {
     try {
       const image = await buildDexScreenerChartImage(pair.url, requestedWindow, logger)
       chartAttachment = new AttachmentBuilder(image, { name: 'loot-chart.png' })
+      renderSource = 'dexscreener'
     } catch (error) {
       logger.warn(
         {
@@ -502,6 +504,7 @@ async function respondPrice(message: Message, requestedWindow: string, logger: L
       if (ohlcv.length >= 2) {
         const chartBytes = await buildQuickChartImage(ohlcv, requestedWindow)
         chartAttachment = new AttachmentBuilder(chartBytes, { name: 'loot-chart.png' })
+        renderSource = 'quickchart'
       }
     } catch (error) {
       logger.warn(
@@ -519,7 +522,13 @@ async function respondPrice(message: Message, requestedWindow: string, logger: L
     .setColor(0x2ed66f)
     .setTitle(title)
     .setURL(openUrl)
-    .setDescription('DexScreener pair + live candle chart.')
+    .setDescription(
+      renderSource === 'dexscreener'
+        ? 'DexScreener pair + screenshot chart.'
+        : renderSource === 'quickchart'
+          ? 'DexScreener pair + live candle chart.'
+          : 'DexScreener pair overview.'
+    )
     .addFields(
       { name: 'Price', value: formatUsd(priceUsd), inline: true },
       { name: '24h', value: formatSignedPercent(change24h), inline: true },
@@ -528,7 +537,7 @@ async function respondPrice(message: Message, requestedWindow: string, logger: L
       { name: '6h', value: formatSignedPercent(change6h), inline: true },
       { name: '24h Volume', value: formatUsd(vol24h), inline: true },
     )
-    .setFooter({ text: `Requested by ${message.author.username}` })
+    .setFooter({ text: `Requested by ${message.author.username} • render: ${renderSource}` })
     .setTimestamp(new Date())
 
   if (chartAttachment) {
