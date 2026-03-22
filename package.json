@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "build": "tsc -p tsconfig.json",
+    "postbuild": "node scripts/installPlaywrightRailway.mjs",
     "start": "node dist/server.js",
     "check": "tsc -p tsconfig.json --noEmit",
     "db:init:agents": "tsx src/scripts/initAgentStatsDb.ts",

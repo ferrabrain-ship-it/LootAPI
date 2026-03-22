@@ -267,3 +267,4 @@ Behavior:
 Important:
 - In Discord Developer Portal, enable **Message Content Intent** for this bot.
 - For `dexscreener` render mode, this service uses Playwright Chromium.
+- On Railway, browsers are installed at build time via `postbuild` and loaded from `/app/ms-playwright`.
