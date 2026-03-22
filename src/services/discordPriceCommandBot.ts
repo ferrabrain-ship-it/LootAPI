@@ -512,7 +512,7 @@ async function buildDexScreenerChartImage(pairUrl: string, requestedWindow: stri
       timeout: env.discordPriceCommandRenderTimeoutMs,
     })
 
-    await page.waitForTimeout(2200)
+    await page.waitForTimeout(3000)
 
     try {
       await page.locator('canvas').first().waitFor({
@@ -529,11 +529,12 @@ async function buildDexScreenerChartImage(pairUrl: string, requestedWindow: stri
       )
     }
 
-    const body = page.locator('body')
-    const image = await body.screenshot({
+    const image = await page.screenshot({
       type: 'png',
       animations: 'disabled',
       caret: 'hide',
+      fullPage: false,
+      timeout: env.discordPriceCommandRenderTimeoutMs,
     })
 
     await context.close()
