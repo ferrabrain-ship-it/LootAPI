@@ -284,6 +284,7 @@ async function buildQuickChartUrl(candles: OhlcvPoint[], requestedWindow: string
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
+      version: '4',
       width: 1200,
       height: 720,
       devicePixelRatio: 2,
