@@ -16,6 +16,7 @@ type Pair = {
   chainId?: string
   dexId?: string
   url?: string
+  pairAddress?: string
   priceUsd?: string
   priceChange?: {
     h24?: number
@@ -45,6 +46,34 @@ const SUPPORTED_WINDOWS = new Set([
   '7d',
   '1w',
 ])
+
+type OhlcvTimeframe = 'minute' | 'hour' | 'day'
+
+type OhlcvWindowConfig = {
+  timeframe: OhlcvTimeframe
+  aggregate: number
+  limit: number
+}
+
+type OhlcvPoint = {
+  timestampSec: number
+  open: number
+  high: number
+  low: number
+  close: number
+  volume: number
+}
+
+const WINDOW_CONFIG: Record<string, OhlcvWindowConfig> = {
+  '15m': { timeframe: 'minute', aggregate: 15, limit: 96 },
+  '1h': { timeframe: 'hour', aggregate: 1, limit: 96 },
+  '4h': { timeframe: 'hour', aggregate: 4, limit: 96 },
+  '12h': { timeframe: 'hour', aggregate: 12, limit: 96 },
+  '24h': { timeframe: 'day', aggregate: 1, limit: 90 },
+  '1d': { timeframe: 'day', aggregate: 1, limit: 90 },
+  '7d': { timeframe: 'day', aggregate: 7, limit: 90 },
+  '1w': { timeframe: 'day', aggregate: 7, limit: 90 },
+}
 
 function numeric(value: unknown) {
   const parsed = typeof value === 'number' ? value : Number.parseFloat(String(value ?? ''))
@@ -111,6 +140,170 @@ async function getBestLootPair() {
   )[0]
 }
 
+async function getOhlcvFromGecko(pairAddress: string, requestedWindow: string) {
+  const config = WINDOW_CONFIG[requestedWindow]
+  if (!config) {
+    throw new Error(`Unsupported window: ${requestedWindow}`)
+  }
+
+  const url = new URL(
+    `https://api.geckoterminal.com/api/v2/networks/base/pools/${pairAddress}/ohlcv/${config.timeframe}`
+  )
+  url.searchParams.set('aggregate', String(config.aggregate))
+  url.searchParams.set('limit', String(config.limit))
+  url.searchParams.set('currency', 'usd')
+
+  const response = await fetch(url.toString(), { cache: 'no-store' })
+  if (!response.ok) {
+    throw new Error(`GeckoTerminal ${response.status}`)
+  }
+
+  const data = await response.json() as {
+    data?: {
+      attributes?: {
+        ohlcv_list?: Array<[number, number, number, number, number, number]>
+      }
+    }
+  }
+
+  const raw = data.data?.attributes?.ohlcv_list ?? []
+  const parsed: OhlcvPoint[] = raw
+    .map((entry) => ({
+      timestampSec: Number(entry[0]),
+      open: Number(entry[1]),
+      high: Number(entry[2]),
+      low: Number(entry[3]),
+      close: Number(entry[4]),
+      volume: Number(entry[5]),
+    }))
+    .filter((entry) => (
+      Number.isFinite(entry.timestampSec) &&
+      Number.isFinite(entry.open) &&
+      Number.isFinite(entry.high) &&
+      Number.isFinite(entry.low) &&
+      Number.isFinite(entry.close)
+    ))
+    .sort((left, right) => left.timestampSec - right.timestampSec)
+
+  return parsed
+}
+
+function formatAxisTs(timestampSec: number) {
+  const date = new Date(timestampSec * 1000)
+  return new Intl.DateTimeFormat('en-US', {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).format(date)
+}
+
+async function buildQuickChartUrl(candles: OhlcvPoint[], requestedWindow: string) {
+  const labels = candles.map((entry) => formatAxisTs(entry.timestampSec))
+  const candleData = candles.map((entry, index) => ({
+    x: index + 1,
+    o: entry.open,
+    h: entry.high,
+    l: entry.low,
+    c: entry.close,
+  }))
+
+  const volumeData = candles.map((entry, index) => ({
+    x: index + 1,
+    y: entry.volume,
+  }))
+
+  const chart = {
+    type: 'candlestick',
+    data: {
+      labels,
+      datasets: [
+        {
+          label: 'LOOT / USD',
+          data: candleData,
+          color: {
+            up: '#2bd67b',
+            down: '#ff5d5d',
+            unchanged: '#9aa4b2',
+          },
+          borderColor: '#2b3345',
+        },
+        {
+          type: 'bar',
+          label: 'Volume',
+          data: volumeData,
+          yAxisID: 'volume',
+          backgroundColor: 'rgba(72, 114, 189, 0.35)',
+          borderWidth: 0,
+          barPercentage: 1.0,
+          categoryPercentage: 0.95,
+        },
+      ],
+    },
+    options: {
+      plugins: {
+        legend: { display: false },
+        title: {
+          display: true,
+          text: `LOOT / USD • ${requestedWindow.toUpperCase()} • Uniswap`,
+          color: '#f5f7fb',
+          font: { size: 20, weight: 'bold' },
+          padding: { top: 10, bottom: 16 },
+        },
+      },
+      layout: {
+        padding: { left: 10, right: 10, top: 6, bottom: 6 },
+      },
+      scales: {
+        x: {
+          grid: { color: 'rgba(123, 142, 184, 0.22)' },
+          ticks: {
+            color: '#9fb0cf',
+            maxTicksLimit: 10,
+            maxRotation: 0,
+          },
+        },
+        y: {
+          position: 'right',
+          grid: { color: 'rgba(123, 142, 184, 0.22)' },
+          ticks: { color: '#9fb0cf' },
+        },
+        volume: {
+          position: 'left',
+          beginAtZero: true,
+          display: false,
+        },
+      },
+    },
+  }
+
+  const response = await fetch('https://quickchart.io/chart/create', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      width: 1200,
+      height: 720,
+      devicePixelRatio: 2,
+      format: 'png',
+      backgroundColor: '#0a1020',
+      chart,
+    }),
+  })
+
+  if (!response.ok) {
+    throw new Error(`QuickChart create ${response.status}`)
+  }
+
+  const payload = await response.json() as { success?: boolean; url?: string }
+  if (!payload?.url) {
+    throw new Error('QuickChart did not return a render URL')
+  }
+  return payload.url
+}
+
 async function respondPrice(message: Message, requestedWindow: string, logger: Logger) {
   const pair = await getBestLootPair()
 
@@ -121,14 +314,33 @@ async function respondPrice(message: Message, requestedWindow: string, logger: L
   const vol24h = numeric(pair.volume?.h24)
   const liqUsd = numeric(pair.liquidity?.usd)
 
-  const title = `LOOT / USD • ${requestedWindow.toUpperCase()} • DexScreener`
+  const title = `LOOT / USD • ${requestedWindow.toUpperCase()}`
   const openUrl = pair.url ? decoratePairUrl(pair.url, requestedWindow) : 'https://dexscreener.com/base'
+  let chartImageUrl: string | null = null
+
+  if (pair.pairAddress) {
+    try {
+      const ohlcv = await getOhlcvFromGecko(pair.pairAddress, requestedWindow)
+      if (ohlcv.length >= 2) {
+        chartImageUrl = await buildQuickChartUrl(ohlcv, requestedWindow)
+      }
+    } catch (error) {
+      logger.warn(
+        {
+          requestedWindow,
+          pairAddress: pair.pairAddress,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        '[discord-price-command-bot] failed to build candle chart; fallback to openGraph'
+      )
+    }
+  }
 
   const embed = new EmbedBuilder()
-    .setColor(0xd4a72c)
+    .setColor(0x2ed66f)
     .setTitle(title)
     .setURL(openUrl)
-    .setDescription('Live pair overview from DexScreener.')
+    .setDescription('DexScreener pair + live candle chart.')
     .addFields(
       { name: 'Price', value: formatUsd(priceUsd), inline: true },
       { name: '24h', value: formatSignedPercent(change24h), inline: true },
@@ -140,7 +352,9 @@ async function respondPrice(message: Message, requestedWindow: string, logger: L
     .setFooter({ text: `Requested by ${message.author.username}` })
     .setTimestamp(new Date())
 
-  if (pair.info?.openGraph) {
+  if (chartImageUrl) {
+    embed.setImage(chartImageUrl)
+  } else if (pair.info?.openGraph) {
     embed.setImage(pair.info.openGraph)
   }
 
