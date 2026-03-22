@@ -11,7 +11,8 @@ if (!isRailway) {
   process.exit(0)
 }
 
-const browsersPath = process.env.PLAYWRIGHT_BROWSERS_PATH || '/app/ms-playwright'
+// Railway final image always ships /app reliably, so keep browsers inside /app.
+const browsersPath = '/app/ms-playwright'
 console.log(`[postbuild] installing Playwright browsers into ${browsersPath}`)
 
 const result = spawnSync(
@@ -32,4 +33,3 @@ if (result.status !== 0) {
 }
 
 console.log('[postbuild] Playwright browser install completed')
-

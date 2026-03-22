@@ -8,7 +8,8 @@ import {
   GatewayIntentBits,
   type Message,
 } from 'discord.js'
-import { existsSync } from 'node:fs'
+import { existsSync, readdirSync } from 'node:fs'
+import { join } from 'node:path'
 import { chromium } from 'playwright'
 import { CONTRACTS } from '../config/contracts.js'
 import { env } from '../config/env.js'
@@ -84,12 +85,58 @@ const PLAYWRIGHT_BROWSERS_PATH_CANDIDATES = [
   '/root/.cache/ms-playwright',
 ]
 
-function ensurePlaywrightBrowsersPath() {
-  if (process.env.PLAYWRIGHT_BROWSERS_PATH?.trim()) return
+function resolvePlaywrightBrowsersPath() {
+  const configured = process.env.PLAYWRIGHT_BROWSERS_PATH?.trim()
+  if (configured && existsSync(configured)) {
+    return configured
+  }
 
   const detected = PLAYWRIGHT_BROWSERS_PATH_CANDIDATES.find((path) => existsSync(path))
-  if (detected) {
-    process.env.PLAYWRIGHT_BROWSERS_PATH = detected
+  if (detected) return detected
+  return configured || '/app/ms-playwright'
+}
+
+function resolvePlaywrightExecutablePath(browsersPath: string) {
+  const configured = env.playwrightChromiumExecutablePath.trim()
+  if (configured) return configured
+
+  if (!existsSync(browsersPath)) return undefined
+
+  try {
+    const entries = readdirSync(browsersPath, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+
+    const headlessDir = entries.find((entry) => entry.startsWith('chromium_headless_shell-'))
+    if (headlessDir) {
+      const candidate = join(
+        browsersPath,
+        headlessDir,
+        'chrome-headless-shell-linux64',
+        'chrome-headless-shell'
+      )
+      if (existsSync(candidate)) return candidate
+    }
+
+    const chromiumDir = entries.find((entry) => entry.startsWith('chromium-'))
+    if (chromiumDir) {
+      const candidate = join(browsersPath, chromiumDir, 'chrome-linux', 'chrome')
+      if (existsSync(candidate)) return candidate
+    }
+  } catch {
+    return undefined
+  }
+
+  return undefined
+}
+
+function ensurePlaywrightRuntimeConfig() {
+  const browsersPath = resolvePlaywrightBrowsersPath()
+  process.env.PLAYWRIGHT_BROWSERS_PATH = browsersPath
+
+  return {
+    browsersPath,
+    executablePath: resolvePlaywrightExecutablePath(browsersPath),
   }
 }
 
@@ -422,11 +469,11 @@ async function buildQuickChartImage(candles: OhlcvPoint[], requestedWindow: stri
 }
 
 async function buildDexScreenerChartImage(pairUrl: string, requestedWindow: string, logger: Logger) {
-  ensurePlaywrightBrowsersPath()
+  const runtime = ensurePlaywrightRuntimeConfig()
   const embedUrl = buildDexScreenerEmbedUrl(pairUrl, requestedWindow)
   const browser = await chromium.launch({
     headless: true,
-    executablePath: env.playwrightChromiumExecutablePath || undefined,
+    executablePath: runtime.executablePath,
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
