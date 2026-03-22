@@ -226,9 +226,11 @@ function buildDexScreenerEmbedUrl(pairUrl: string, requestedWindow: string) {
   parsed.searchParams.set('tabs', '0')
   parsed.searchParams.set('info', '0')
   parsed.searchParams.set('chartLeftToolbar', '0')
+  parsed.searchParams.set('chartTimeframesToolbar', '0')
+  parsed.searchParams.set('chartDefaultOnMobile', '1')
   parsed.searchParams.set('chartTheme', 'dark')
   parsed.searchParams.set('theme', 'dark')
-  parsed.searchParams.set('chartStyle', '0')
+  parsed.searchParams.set('chartStyle', '1')
   parsed.searchParams.set('chartType', 'usd')
   parsed.searchParams.set('interval', interval)
   parsed.searchParams.set('utm_source', 'mineloot-discord-bot')
@@ -514,6 +516,29 @@ async function buildDexScreenerChartImage(pairUrl: string, requestedWindow: stri
 
     await page.waitForTimeout(3000)
 
+    // Force chart mode to Price + USD when the toggle bar is visible.
+    await page.evaluate(() => {
+      const clickToggleLeft = (pattern: RegExp) => {
+        const nodes = Array.from(document.querySelectorAll('button,div,span')) as HTMLElement[]
+        const target = nodes.find((node) => pattern.test((node.textContent || '').replace(/\s+/g, ' ').trim()))
+        if (!target) return
+        const rect = target.getBoundingClientRect()
+        if (!rect.width || !rect.height) return
+        const x = rect.left + Math.max(8, rect.width * 0.22)
+        const y = rect.top + rect.height / 2
+        const element = document.elementFromPoint(x, y) as HTMLElement | null
+        const receiver = element || target
+        receiver.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: x, clientY: y, view: window }))
+        receiver.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, clientX: x, clientY: y, view: window }))
+        receiver.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, clientX: x, clientY: y, view: window }))
+        receiver.dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: x, clientY: y, view: window }))
+      }
+
+      clickToggleLeft(/Price\s*\/\s*MCAP/i)
+      clickToggleLeft(/USD\s*\/\s*ETH/i)
+    })
+    await page.waitForTimeout(450)
+
     try {
       await page.locator('canvas').first().waitFor({
         state: 'visible',
@@ -535,14 +560,21 @@ async function buildDexScreenerChartImage(pairUrl: string, requestedWindow: stri
     const centerY = Math.floor(viewport.height * 0.55)
     await page.mouse.move(centerX, centerY)
     await page.mouse.click(centerX, centerY)
-    for (let i = 0; i < 12; i += 1) {
-      await page.mouse.wheel(0, -640)
+    const zoomSteps = requestedWindow === '15m'
+      ? 22
+      : requestedWindow === '1h'
+        ? 18
+        : requestedWindow === '4h'
+          ? 14
+          : 12
+    for (let i = 0; i < zoomSteps; i += 1) {
+      await page.mouse.wheel(0, -760)
       await page.waitForTimeout(45)
     }
     await page.waitForTimeout(500)
 
     const clipX = 20
-    const clipY = 58
+    const clipY = 66
     const clipWidth = Math.max(100, viewport.width - clipX * 2)
     const clipHeight = Math.max(100, viewport.height - clipY - 24)
 
