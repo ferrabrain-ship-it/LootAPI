@@ -1,5 +1,6 @@
 import {
   ActionRowBuilder,
+  AttachmentBuilder,
   ButtonBuilder,
   ButtonStyle,
   Client,
@@ -199,7 +200,7 @@ function formatAxisTs(timestampSec: number) {
   }).format(date)
 }
 
-async function buildQuickChartUrl(candles: OhlcvPoint[], requestedWindow: string) {
+async function buildQuickChartImage(candles: OhlcvPoint[], requestedWindow: string) {
   const labels = candles.map((entry) => formatAxisTs(entry.timestampSec))
   const candleData = candles.map((entry, index) => ({
     x: index + 1,
@@ -278,7 +279,7 @@ async function buildQuickChartUrl(candles: OhlcvPoint[], requestedWindow: string
     },
   }
 
-  const response = await fetch('https://quickchart.io/chart/create', {
+  const createResponse = await fetch('https://quickchart.io/chart/create', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -294,15 +295,27 @@ async function buildQuickChartUrl(candles: OhlcvPoint[], requestedWindow: string
     }),
   })
 
-  if (!response.ok) {
-    throw new Error(`QuickChart create ${response.status}`)
+  if (!createResponse.ok) {
+    throw new Error(`QuickChart create ${createResponse.status}`)
   }
 
-  const payload = await response.json() as { success?: boolean; url?: string }
+  const payload = await createResponse.json() as { success?: boolean; url?: string }
   if (!payload?.url) {
     throw new Error('QuickChart did not return a render URL')
   }
-  return payload.url
+
+  const imageResponse = await fetch(payload.url, { cache: 'no-store' })
+  if (!imageResponse.ok) {
+    throw new Error(`QuickChart render ${imageResponse.status}`)
+  }
+
+  const mime = imageResponse.headers.get('content-type') || ''
+  if (!mime.includes('image/')) {
+    throw new Error(`QuickChart render returned non-image content-type: ${mime}`)
+  }
+
+  const bytes = Buffer.from(await imageResponse.arrayBuffer())
+  return bytes
 }
 
 async function respondPrice(message: Message, requestedWindow: string, logger: Logger) {
@@ -317,13 +330,14 @@ async function respondPrice(message: Message, requestedWindow: string, logger: L
 
   const title = `LOOT / USD • ${requestedWindow.toUpperCase()}`
   const openUrl = pair.url ? decoratePairUrl(pair.url, requestedWindow) : 'https://dexscreener.com/base'
-  let chartImageUrl: string | null = null
+  let chartAttachment: AttachmentBuilder | null = null
 
   if (pair.pairAddress) {
     try {
       const ohlcv = await getOhlcvFromGecko(pair.pairAddress, requestedWindow)
       if (ohlcv.length >= 2) {
-        chartImageUrl = await buildQuickChartUrl(ohlcv, requestedWindow)
+        const chartBytes = await buildQuickChartImage(ohlcv, requestedWindow)
+        chartAttachment = new AttachmentBuilder(chartBytes, { name: 'loot-chart.png' })
       }
     } catch (error) {
       logger.warn(
@@ -353,8 +367,8 @@ async function respondPrice(message: Message, requestedWindow: string, logger: L
     .setFooter({ text: `Requested by ${message.author.username}` })
     .setTimestamp(new Date())
 
-  if (chartImageUrl) {
-    embed.setImage(chartImageUrl)
+  if (chartAttachment) {
+    embed.setImage('attachment://loot-chart.png')
   } else if (pair.info?.openGraph) {
     embed.setImage(pair.info.openGraph)
   }
@@ -366,11 +380,20 @@ async function respondPrice(message: Message, requestedWindow: string, logger: L
       .setURL(openUrl)
   )
 
-  await message.reply({
-    embeds: [embed],
-    components: [row],
-    allowedMentions: { repliedUser: false },
-  })
+  await message.reply(
+    chartAttachment
+      ? {
+          embeds: [embed],
+          components: [row],
+          files: [chartAttachment],
+          allowedMentions: { repliedUser: false },
+        }
+      : {
+          embeds: [embed],
+          components: [row],
+          allowedMentions: { repliedUser: false },
+        }
+  )
 
   logger.info(
     {
