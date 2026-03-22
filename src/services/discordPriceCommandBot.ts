@@ -500,7 +500,7 @@ async function buildDexScreenerChartImage(pairUrl: string, requestedWindow: stri
 
   try {
     const context = await browser.newContext({
-      viewport: { width: 1280, height: 860 },
+      viewport: { width: 1400, height: 920 },
       deviceScaleFactor: 2,
       colorScheme: 'dark',
       userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36',
@@ -529,11 +529,34 @@ async function buildDexScreenerChartImage(pairUrl: string, requestedWindow: stri
       )
     }
 
+    // Focus chart and zoom in a bit so candles remain readable inside Discord embeds.
+    const viewport = page.viewportSize() ?? { width: 1400, height: 920 }
+    const centerX = Math.floor(viewport.width * 0.52)
+    const centerY = Math.floor(viewport.height * 0.55)
+    await page.mouse.move(centerX, centerY)
+    await page.mouse.click(centerX, centerY)
+    for (let i = 0; i < 12; i += 1) {
+      await page.mouse.wheel(0, -640)
+      await page.waitForTimeout(45)
+    }
+    await page.waitForTimeout(500)
+
+    const clipX = 20
+    const clipY = 58
+    const clipWidth = Math.max(100, viewport.width - clipX * 2)
+    const clipHeight = Math.max(100, viewport.height - clipY - 24)
+
     const image = await page.screenshot({
       type: 'png',
       animations: 'disabled',
       caret: 'hide',
       fullPage: false,
+      clip: {
+        x: clipX,
+        y: clipY,
+        width: clipWidth,
+        height: clipHeight,
+      },
       timeout: env.discordPriceCommandRenderTimeoutMs,
     })
 
