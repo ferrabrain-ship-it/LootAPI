@@ -8,6 +8,7 @@ import {
   GatewayIntentBits,
   type Message,
 } from 'discord.js'
+import { chromium } from 'playwright'
 import { CONTRACTS } from '../config/contracts.js'
 import { env } from '../config/env.js'
 
@@ -119,6 +120,45 @@ function decoratePairUrl(url: string, requestedWindow: string) {
   } catch {
     return url
   }
+}
+
+function toDexScreenerInterval(requestedWindow: string) {
+  switch (requestedWindow) {
+    case '15m':
+      return '15'
+    case '1h':
+      return '60'
+    case '4h':
+      return '240'
+    case '12h':
+      return '720'
+    case '24h':
+    case '1d':
+      return 'D'
+    case '7d':
+    case '1w':
+      return 'W'
+    default:
+      return '240'
+  }
+}
+
+function buildDexScreenerEmbedUrl(pairUrl: string, requestedWindow: string) {
+  const parsed = new URL(pairUrl)
+  const interval = toDexScreenerInterval(requestedWindow)
+  parsed.searchParams.set('embed', '1')
+  parsed.searchParams.set('loadChartSettings', '0')
+  parsed.searchParams.set('trades', '0')
+  parsed.searchParams.set('tabs', '0')
+  parsed.searchParams.set('info', '0')
+  parsed.searchParams.set('chartLeftToolbar', '0')
+  parsed.searchParams.set('chartTheme', 'dark')
+  parsed.searchParams.set('theme', 'dark')
+  parsed.searchParams.set('chartStyle', '0')
+  parsed.searchParams.set('chartType', 'usd')
+  parsed.searchParams.set('interval', interval)
+  parsed.searchParams.set('utm_source', 'mineloot-discord-bot')
+  return parsed.toString()
 }
 
 async function getBestLootPair() {
@@ -365,6 +405,67 @@ async function buildQuickChartImage(candles: OhlcvPoint[], requestedWindow: stri
   return bytes
 }
 
+async function buildDexScreenerChartImage(pairUrl: string, requestedWindow: string, logger: Logger) {
+  const embedUrl = buildDexScreenerEmbedUrl(pairUrl, requestedWindow)
+  const browser = await chromium.launch({
+    headless: true,
+    executablePath: env.playwrightChromiumExecutablePath || undefined,
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-gpu',
+      '--disable-background-networking',
+      '--disable-background-timer-throttling',
+      '--disable-renderer-backgrounding',
+    ],
+  })
+
+  try {
+    const context = await browser.newContext({
+      viewport: { width: 1280, height: 860 },
+      deviceScaleFactor: 2,
+      colorScheme: 'dark',
+      userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36',
+    })
+    const page = await context.newPage()
+
+    await page.goto(embedUrl, {
+      waitUntil: 'domcontentloaded',
+      timeout: env.discordPriceCommandRenderTimeoutMs,
+    })
+
+    await page.waitForTimeout(2200)
+
+    try {
+      await page.locator('canvas').first().waitFor({
+        state: 'visible',
+        timeout: 6000,
+      })
+    } catch (error) {
+      logger.warn(
+        {
+          embedUrl,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        '[discord-price-command-bot] canvas wait timeout, taking fallback body screenshot'
+      )
+    }
+
+    const body = page.locator('body')
+    const image = await body.screenshot({
+      type: 'png',
+      animations: 'disabled',
+      caret: 'hide',
+    })
+
+    await context.close()
+    return image
+  } finally {
+    await browser.close()
+  }
+}
+
 async function respondPrice(message: Message, requestedWindow: string, logger: Logger) {
   const pair = await getBestLootPair()
 
@@ -379,7 +480,23 @@ async function respondPrice(message: Message, requestedWindow: string, logger: L
   const openUrl = pair.url ? decoratePairUrl(pair.url, requestedWindow) : 'https://dexscreener.com/base'
   let chartAttachment: AttachmentBuilder | null = null
 
-  if (pair.pairAddress) {
+  if (env.discordPriceCommandRenderMode === 'dexscreener' && pair.url) {
+    try {
+      const image = await buildDexScreenerChartImage(pair.url, requestedWindow, logger)
+      chartAttachment = new AttachmentBuilder(image, { name: 'loot-chart.png' })
+    } catch (error) {
+      logger.warn(
+        {
+          requestedWindow,
+          pairUrl: pair.url,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        '[discord-price-command-bot] dexscreener screenshot failed; fallback to quickchart'
+      )
+    }
+  }
+
+  if (!chartAttachment && pair.pairAddress) {
     try {
       const ohlcv = await getOhlcvFromGecko(pair.pairAddress, requestedWindow)
       if (ohlcv.length >= 2) {

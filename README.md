@@ -73,6 +73,9 @@ DISCORD_PRICE_COMMAND_BOT_TOKEN=
 DISCORD_PRICE_COMMAND_ALLOWED_GUILD_ID=
 DISCORD_PRICE_COMMAND_ALLOWED_CHANNEL_ID=
 DISCORD_PRICE_COMMAND_PREFIX=price
+DISCORD_PRICE_COMMAND_RENDER_MODE=dexscreener
+DISCORD_PRICE_COMMAND_RENDER_TIMEOUT_MS=14000
+PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=
 DISCORD_METRIC_BOTS_GUILD_ID=
 DISCORD_CIRCULATING_BOT_TOKEN=
 DISCORD_BURNED_BOT_TOKEN=
@@ -245,6 +248,15 @@ DISCORD_PRICE_COMMAND_ALLOWED_CHANNEL_ID=...
 
 # command keyword (default: price)
 DISCORD_PRICE_COMMAND_PREFIX=price
+
+# render mode: dexscreener (headless screenshot) or quickchart (lightweight fallback)
+DISCORD_PRICE_COMMAND_RENDER_MODE=dexscreener
+
+# screenshot timeout in ms
+DISCORD_PRICE_COMMAND_RENDER_TIMEOUT_MS=14000
+
+# optional custom chromium path (useful on custom Docker images)
+PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=
 ```
 
 Behavior:
@@ -254,3 +266,4 @@ Behavior:
 
 Important:
 - In Discord Developer Portal, enable **Message Content Intent** for this bot.
+- For `dexscreener` render mode, this service uses Playwright Chromium.
