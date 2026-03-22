@@ -85,22 +85,8 @@ const PLAYWRIGHT_BROWSERS_PATH_CANDIDATES = [
   '/root/.cache/ms-playwright',
 ]
 
-function resolvePlaywrightBrowsersPath() {
-  const configured = process.env.PLAYWRIGHT_BROWSERS_PATH?.trim()
-  if (configured && existsSync(configured)) {
-    return configured
-  }
-
-  const detected = PLAYWRIGHT_BROWSERS_PATH_CANDIDATES.find((path) => existsSync(path))
-  if (detected) return detected
-  return configured || '/app/ms-playwright'
-}
-
-function resolvePlaywrightExecutablePath(browsersPath: string) {
-  const configured = env.playwrightChromiumExecutablePath.trim()
-  if (configured) return configured
-
-  if (!existsSync(browsersPath)) return undefined
+function resolvePlaywrightExecutablePathFromBrowsersPath(browsersPath: string) {
+  if (!browsersPath || !existsSync(browsersPath)) return undefined
 
   try {
     const entries = readdirSync(browsersPath, { withFileTypes: true })
@@ -131,12 +117,37 @@ function resolvePlaywrightExecutablePath(browsersPath: string) {
 }
 
 function ensurePlaywrightRuntimeConfig() {
-  const browsersPath = resolvePlaywrightBrowsersPath()
-  process.env.PLAYWRIGHT_BROWSERS_PATH = browsersPath
+  const explicitExecutable = env.playwrightChromiumExecutablePath.trim()
+  if (explicitExecutable) {
+    return {
+      browsersPath: process.env.PLAYWRIGHT_BROWSERS_PATH || '',
+      executablePath: explicitExecutable,
+    }
+  }
 
+  const configuredPath = process.env.PLAYWRIGHT_BROWSERS_PATH?.trim()
+  if (configuredPath) {
+    const executable = resolvePlaywrightExecutablePathFromBrowsersPath(configuredPath)
+    if (executable) {
+      process.env.PLAYWRIGHT_BROWSERS_PATH = configuredPath
+      return { browsersPath: configuredPath, executablePath: executable }
+    }
+  }
+
+  for (const candidate of PLAYWRIGHT_BROWSERS_PATH_CANDIDATES) {
+    const executable = resolvePlaywrightExecutablePathFromBrowsersPath(candidate)
+    if (executable) {
+      process.env.PLAYWRIGHT_BROWSERS_PATH = candidate
+      return { browsersPath: candidate, executablePath: executable }
+    }
+  }
+
+  // Last-resort fallback, Playwright may still resolve bundled executable if available.
+  const fallbackPath = configuredPath || '/app/ms-playwright'
+  process.env.PLAYWRIGHT_BROWSERS_PATH = fallbackPath
   return {
-    browsersPath,
-    executablePath: resolvePlaywrightExecutablePath(browsersPath),
+    browsersPath: fallbackPath,
+    executablePath: undefined,
   }
 }
 
