@@ -57,6 +57,7 @@ NEXT_PUBLIC_APP_URL=https://mineloot.app
 ENABLE_LOOTPOT_WORKER=false
 ENABLE_DISCORD_PRICE_WORKER=false
 ENABLE_DISCORD_METRIC_BOTS_WORKER=false
+ENABLE_DISCORD_PRICE_COMMAND_BOT=false
 RPC_URL_PRIMARY=https://mainnet.base.org
 RPC_URL_FALLBACK_1=https://base.llamarpc.com
 RPC_URL_FALLBACK_2=https://rpc.ankr.com/base
@@ -68,6 +69,9 @@ DISCORD_BOT_TOKEN=
 DISCORD_GUILD_ID=
 DISCORD_PRICE_POLL_INTERVAL_MS=600000
 DISCORD_PRICE_DATABASE_URL=
+DISCORD_PRICE_COMMAND_BOT_TOKEN=
+DISCORD_PRICE_COMMAND_ALLOWED_GUILD_ID=
+DISCORD_PRICE_COMMAND_PREFIX=price
 DISCORD_METRIC_BOTS_GUILD_ID=
 DISCORD_CIRCULATING_BOT_TOKEN=
 DISCORD_BURNED_BOT_TOKEN=
@@ -213,3 +217,36 @@ You can run it inline on the API service too:
 ```env
 ENABLE_DISCORD_METRIC_BOTS_WORKER=true
 ```
+
+## Discord price command bot (chat trigger)
+
+Run a command bot that replies to chat commands like `price 4h`.
+
+```bash
+npm run worker:discord-price-command
+```
+
+Required env:
+
+```env
+ENABLE_DISCORD_PRICE_COMMAND_BOT=true
+DISCORD_PRICE_COMMAND_BOT_TOKEN=...
+```
+
+Optional env:
+
+```env
+# limit replies to one guild only
+DISCORD_PRICE_COMMAND_ALLOWED_GUILD_ID=...
+
+# command keyword (default: price)
+DISCORD_PRICE_COMMAND_PREFIX=price
+```
+
+Behavior:
+- users type: `price`, `price 1h`, `price 4h`, `price 1d`, etc.
+- bot replies with an embed based on live DexScreener pair data
+- includes chart preview image from DexScreener `openGraph` when available
+
+Important:
+- In Discord Developer Portal, enable **Message Content Intent** for this bot.

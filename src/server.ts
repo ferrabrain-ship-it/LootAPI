@@ -34,6 +34,7 @@ import { getProfile, getProfilesBatch } from './services/profiles.js'
 import { runLootpotNotifierOnce } from './services/lootpotNotifier.js'
 import { createDiscordPriceWorker } from './services/discordPriceWorker.js'
 import { createDiscordMetricBotsWorker } from './services/discordMetricBotsWorker.js'
+import { createDiscordPriceCommandBot } from './services/discordPriceCommandBot.js'
 
 const app = Fastify({ logger: true })
 let lootpotWorkerStopping = false
@@ -43,6 +44,7 @@ let agentStatsWorkerStopping = false
 let agentStatsWorkerTimer: NodeJS.Timeout | null = null
 const discordPriceWorker = createDiscordPriceWorker({ logger: console })
 const discordMetricBotsWorker = createDiscordMetricBotsWorker({ logger: console })
+const discordPriceCommandBot = createDiscordPriceCommandBot({ logger: console })
 
 await app.register(cors, {
   origin: true,
@@ -343,12 +345,22 @@ async function startDiscordMetricBotsWorker() {
   }
 }
 
+async function startDiscordPriceCommandBot() {
+  if (!discordPriceCommandBot.enabled) return
+  try {
+    await discordPriceCommandBot.start()
+  } catch (error) {
+    app.log.error(error, '[discord-price-command-bot] failed to start')
+  }
+}
+
 process.on('SIGTERM', () => {
   stopLootpotWorker()
   stopAgentStatsWorker()
   stopCacheWarmer()
   void discordPriceWorker.stop()
   void discordMetricBotsWorker.stop()
+  void discordPriceCommandBot.stop()
 })
 process.on('SIGINT', () => {
   stopLootpotWorker()
@@ -356,6 +368,7 @@ process.on('SIGINT', () => {
   stopCacheWarmer()
   void discordPriceWorker.stop()
   void discordMetricBotsWorker.stop()
+  void discordPriceCommandBot.stop()
 })
 
 app.listen({ port: env.port, host: '0.0.0.0' })
@@ -366,6 +379,7 @@ app.listen({ port: env.port, host: '0.0.0.0' })
     startAgentStatsWorker()
     void startDiscordPriceWorker()
     void startDiscordMetricBotsWorker()
+    void startDiscordPriceCommandBot()
   })
   .catch((error) => {
     app.log.error(error)
