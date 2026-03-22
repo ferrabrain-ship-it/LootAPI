@@ -200,7 +200,47 @@ function formatAxisTs(timestampSec: number) {
   }).format(date)
 }
 
+function percentile(values: number[], p: number) {
+  if (!values.length) return 0
+  const sorted = [...values].sort((a, b) => a - b)
+  const clamped = Math.max(0, Math.min(1, p))
+  const idx = (sorted.length - 1) * clamped
+  const lo = Math.floor(idx)
+  const hi = Math.ceil(idx)
+  if (lo === hi) return sorted[lo]
+  const weight = idx - lo
+  return sorted[lo] * (1 - weight) + sorted[hi] * weight
+}
+
+function deriveYBounds(candles: OhlcvPoint[]) {
+  const highs = candles.map((entry) => entry.high).filter(Number.isFinite)
+  const lows = candles.map((entry) => entry.low).filter(Number.isFinite)
+
+  if (!highs.length || !lows.length) {
+    return { min: 0, max: 1 }
+  }
+
+  const absoluteMax = Math.max(...highs)
+  const absoluteMin = Math.min(...lows)
+  const p98 = percentile(highs, 0.98)
+  const p95 = percentile(highs, 0.95)
+  const p02 = percentile(lows, 0.02)
+
+  // Trim extreme listing wick/outlier so recent action remains readable.
+  const effectiveMax = absoluteMax > p95 * 1.8 ? p98 : absoluteMax
+  const latest = candles[candles.length - 1]
+  const max = Math.max(effectiveMax, latest?.high ?? effectiveMax)
+  const minBase = Math.min(p02, latest?.low ?? p02, absoluteMin)
+  const span = Math.max(max - minBase, max * 0.08, 1e-8)
+
+  return {
+    min: Math.max(0, minBase - span * 0.08),
+    max: max + span * 0.12,
+  }
+}
+
 async function buildQuickChartImage(candles: OhlcvPoint[], requestedWindow: string) {
+  const y = deriveYBounds(candles)
   const labels = candles.map((entry) => formatAxisTs(entry.timestampSec))
   const candleData = candles.map((entry, index) => ({
     x: index + 1,
@@ -261,18 +301,25 @@ async function buildQuickChartImage(candles: OhlcvPoint[], requestedWindow: stri
           grid: { color: 'rgba(123, 142, 184, 0.22)' },
           ticks: {
             color: '#9fb0cf',
-            maxTicksLimit: 10,
-            maxRotation: 0,
-          },
+          maxTicksLimit: 10,
+          minRotation: 0,
+          maxRotation: 0,
         },
-        y: {
-          position: 'right',
-          grid: { color: 'rgba(123, 142, 184, 0.22)' },
-          ticks: { color: '#9fb0cf' },
+      },
+      y: {
+        position: 'right',
+        min: y.min,
+        max: y.max,
+        grid: { color: 'rgba(123, 142, 184, 0.22)' },
+        ticks: {
+          color: '#c6d2ea',
+          callback: 'function(value){ return Number(value).toFixed(6); }',
+          maxTicksLimit: 8,
         },
-        volume: {
-          position: 'left',
-          beginAtZero: true,
+      },
+      volume: {
+        position: 'left',
+        beginAtZero: true,
           display: false,
         },
       },
@@ -286,8 +333,8 @@ async function buildQuickChartImage(candles: OhlcvPoint[], requestedWindow: stri
     },
     body: JSON.stringify({
       version: '4',
-      width: 1200,
-      height: 720,
+      width: 1280,
+      height: 960,
       devicePixelRatio: 2,
       format: 'png',
       backgroundColor: '#0a1020',
