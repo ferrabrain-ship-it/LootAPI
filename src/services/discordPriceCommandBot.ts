@@ -93,6 +93,12 @@ function resolvePlaywrightExecutablePathFromBrowsersPath(browsersPath: string) {
       .filter((entry) => entry.isDirectory())
       .map((entry) => entry.name)
 
+    const chromiumDir = entries.find((entry) => entry.startsWith('chromium-'))
+    if (chromiumDir) {
+      const candidate = join(browsersPath, chromiumDir, 'chrome-linux', 'chrome')
+      if (existsSync(candidate)) return candidate
+    }
+
     const headlessDir = entries.find((entry) => entry.startsWith('chromium_headless_shell-'))
     if (headlessDir) {
       const candidate = join(
@@ -101,12 +107,6 @@ function resolvePlaywrightExecutablePathFromBrowsersPath(browsersPath: string) {
         'chrome-headless-shell-linux64',
         'chrome-headless-shell'
       )
-      if (existsSync(candidate)) return candidate
-    }
-
-    const chromiumDir = entries.find((entry) => entry.startsWith('chromium-'))
-    if (chromiumDir) {
-      const candidate = join(browsersPath, chromiumDir, 'chrome-linux', 'chrome')
       if (existsSync(candidate)) return candidate
     }
   } catch {
@@ -490,6 +490,8 @@ async function buildDexScreenerChartImage(pairUrl: string, requestedWindow: stri
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
       '--disable-gpu',
+      '--no-zygote',
+      '--single-process',
       '--disable-background-networking',
       '--disable-background-timer-throttling',
       '--disable-renderer-backgrounding',
