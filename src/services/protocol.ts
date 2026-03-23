@@ -96,6 +96,7 @@ const LOG_BLOCK_RANGE = 10_000n
 const MIN_LOG_BLOCK_RANGE = 1_000n
 const GLOBAL_LOG_CACHE_TTL_MS = 60_000
 const HEAVY_ROUTE_CACHE_TTL_MS = 60_000
+const STAKING_APR_WINDOW_DAYS = 7
 const RECENT_SETTLED_LOOKBACK = 1_000n
 const RECENT_SETTLED_LIST_LOOKBACK = 5_000n
 const RECENT_DEPLOY_LOOKBACK = 5_000n
@@ -1599,14 +1600,17 @@ export async function getStakingStats() {
     const tvlUsd = Number(formatEther(totalStaked)) * price.priceUsd
 
     const now = Date.now()
-    let yield30d = 0n
+    const stakingAprWindowMs = STAKING_APR_WINDOW_DAYS * 24 * 60 * 60 * 1000
+    let yieldInWindow = 0n
     for (const log of yieldLogs) {
       const ts = await getBlockTimestampMs(log.blockNumber)
-      if (ts >= now - (30 * 24 * 60 * 60 * 1000)) {
-        yield30d += toBigInt(log.args.amount)
+      if (ts >= now - stakingAprWindowMs) {
+        yieldInWindow += toBigInt(log.args.amount)
       }
     }
-    const apr = totalStaked > 0n ? (Number(formatEther(yield30d)) * (365 / 30) / Number(formatEther(totalStaked))) * 100 : 0
+    const apr = totalStaked > 0n
+      ? (Number(formatEther(yieldInWindow)) * (365 / STAKING_APR_WINDOW_DAYS) / Number(formatEther(totalStaked))) * 100
+      : 0
 
     return {
       totalStaked: totalStaked.toString(),
