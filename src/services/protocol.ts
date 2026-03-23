@@ -95,7 +95,7 @@ const blockTimestampCache = new Map<string, number>()
 const LOG_BLOCK_RANGE = 10_000n
 const MIN_LOG_BLOCK_RANGE = 1_000n
 const GLOBAL_LOG_CACHE_TTL_MS = 60_000
-const HEAVY_ROUTE_CACHE_TTL_MS = 60_000
+const HEAVY_ROUTE_CACHE_TTL_MS = 120_000
 const STAKING_APR_WINDOW_DAYS = 7
 const RECENT_SETTLED_LOOKBACK = 1_000n
 const RECENT_SETTLED_LIST_LOOKBACK = 5_000n
@@ -123,7 +123,7 @@ async function withCache<T>(key: string, ttlMs: number, loader: () => Promise<T>
   const now = Date.now()
   const cached = responseCache.get(key)
   const maxStaleMs = options?.maxStaleMs ?? Math.max(ttlMs * 3, MAX_STALE_CACHE_MS)
-  const canServeStale = !!cached && (now - (cached.expiresAt - ttlMs)) <= maxStaleMs
+  const canServeStale = !!cached && now <= (cached.expiresAt + maxStaleMs)
   if (cached && cached.expiresAt > now) {
     return cached.value as T
   }
