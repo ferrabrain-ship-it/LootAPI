@@ -549,6 +549,7 @@ async function isRecentRound(roundId: bigint) {
 }
 
 export async function getLootPrice() {
+  return withCache('loot-price', 20_000, async () => {
   try {
     const res = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${CONTRACTS.loot}`, { cache: 'no-store' })
     if (!res.ok) {
@@ -567,6 +568,14 @@ export async function getLootPrice() {
   } catch {
     return emptyPricePayload()
   }
+  }, {
+    staleWhileRevalidate: true,
+    maxStaleMs: 2 * 60_000,
+  })
+}
+
+export async function getLootPriceCached() {
+  return getLootPrice()
 }
 
 export async function getStats() {
@@ -590,6 +599,9 @@ export async function getStats() {
       totalMintedFormatted: etherString(totalMinted),
       ...price.payload,
     }
+  }, {
+    staleWhileRevalidate: true,
+    maxStaleMs: HEAVY_CACHE_MAX_STALE_MS,
   })
 }
 
@@ -1379,6 +1391,9 @@ export async function getRounds(page = 1, limit = 12, lootpotOnly = false) {
       rounds,
       pagination: { page, limit, total, pages },
     }
+  }, {
+    staleWhileRevalidate: true,
+    maxStaleMs: HEAVY_CACHE_MAX_STALE_MS,
   })
 }
 
@@ -1549,6 +1564,9 @@ export async function getTreasuryStats() {
       totalDistributedToStakersFormatted: etherString(stats[2]),
       totalBuybacks: Number(stats[3]),
     }
+  }, {
+    staleWhileRevalidate: true,
+    maxStaleMs: HEAVY_CACHE_MAX_STALE_MS,
   })
 }
 
@@ -1608,6 +1626,9 @@ export async function getBuybacks(page = 1, limit = 12) {
       buybacks,
       pagination: { page, limit, total, pages },
     }
+  }, {
+    staleWhileRevalidate: true,
+    maxStaleMs: HEAVY_CACHE_MAX_STALE_MS,
   })
 }
 
@@ -1655,11 +1676,14 @@ export async function getStakingStats() {
       apr: apr.toFixed(2),
       tvlUsd: tvlUsd.toFixed(2),
     }
+  }, {
+    staleWhileRevalidate: true,
+    maxStaleMs: HEAVY_CACHE_MAX_STALE_MS,
   })
 }
 
 export async function getUserStake(address: Address) {
-  return withCache(`user-stake:${address}`, 10_000, async () => {
+  return withCache(`user-stake:${address}`, 15_000, async () => {
     const [stakeInfo, pendingRewards] = await Promise.all([
       withRpcRetries(() => publicClient.readContract({
         address: CONTRACTS.staking,
@@ -1687,11 +1711,14 @@ export async function getUserStake(address: Address) {
       lastWithdrawAt: Number(stakeInfo[5]),
       canCompound: stakeInfo[6],
     }
+  }, {
+    staleWhileRevalidate: true,
+    maxStaleMs: 2 * 60_000,
   })
 }
 
 export async function getUserRewards(address: Address) {
-  return withCache(`user-rewards:${address}`, 2_000, async () => {
+  return withCache(`user-rewards:${address}`, 15_000, async () => {
     const [pending, pendingLoot] = await Promise.all([
       withRpcRetries(() => publicClient.readContract({
         address: CONTRACTS.gridMining,
@@ -1731,6 +1758,9 @@ export async function getUserRewards(address: Address) {
       },
       uncheckpointedRound: pending[3].toString(),
     }
+  }, {
+    staleWhileRevalidate: true,
+    maxStaleMs: 2 * 60_000,
   })
 }
 
@@ -1964,6 +1994,9 @@ export async function getLockStats() {
       totalClaimedFormatted: etherString(totalClaimed),
       lockers,
     }
+  }, {
+    staleWhileRevalidate: true,
+    maxStaleMs: HEAVY_CACHE_MAX_STALE_MS,
   })
 }
 
@@ -2019,6 +2052,9 @@ export async function getLockDistributions(page = 1, limit = 12) {
         pages,
       },
     }
+  }, {
+    staleWhileRevalidate: true,
+    maxStaleMs: HEAVY_CACHE_MAX_STALE_MS,
   })
 }
 
@@ -2041,6 +2077,9 @@ export async function getLeaderboardLockers(limit = 12) {
       })
 
     return { lockers }
+  }, {
+    staleWhileRevalidate: true,
+    maxStaleMs: HEAVY_CACHE_MAX_STALE_MS,
   })
 }
 
@@ -2067,6 +2106,9 @@ export async function getLeaderboardMiners(limit = 12) {
       miners: deployers,
       deployers,
     }
+  }, {
+    staleWhileRevalidate: true,
+    maxStaleMs: HEAVY_CACHE_MAX_STALE_MS,
   })
 }
 
@@ -2086,6 +2128,9 @@ export async function getLeaderboardStakers(limit = 12) {
         }))
 
     return { stakers }
+  }, {
+    staleWhileRevalidate: true,
+    maxStaleMs: HEAVY_CACHE_MAX_STALE_MS,
   })
 }
 
@@ -2130,33 +2175,40 @@ export async function getLeaderboardEarners(limit = 12) {
       earners,
       pagination: { page: 1, limit, total: earners.length, pages: 1 },
     }
+  }, {
+    staleWhileRevalidate: true,
+    maxStaleMs: HEAVY_CACHE_MAX_STALE_MS,
   })
 }
 
 export async function warmProtocolCaches() {
-  await Promise.allSettled([
-    getProtocolStatus(),
-    getRoundSettledLogs(),
-    getRecentRoundSettledLogs(),
-    getDeploymentSnapshot(),
-    getStakeSnapshot(),
-    getCheckpointLogs(),
-    getLockerSnapshot(),
-    getLockRewardNotifiedLogs(),
-    getVaultLogs(),
-    getStandaloneBurnLogs(),
-  ])
+  const tasks: Array<() => Promise<unknown>> = [
+    () => getProtocolStatus(),
+    () => getRoundSettledLogs(),
+    () => getRecentRoundSettledLogs(),
+    () => getDeploymentSnapshot(),
+    () => getStakeSnapshot(),
+    () => getCheckpointLogs(),
+    () => getLockerSnapshot(),
+    () => getLockRewardNotifiedLogs(),
+    () => getVaultLogs(),
+    () => getStandaloneBurnLogs(),
+    () => getStats(),
+    () => getRounds(1, 12, false),
+    () => getLeaderboardMiners(12),
+    () => getLeaderboardStakers(12),
+    () => getLeaderboardLockers(12),
+    () => getLockDistributions(1, 12),
+    () => getLockStats(),
+  ]
 
-  await Promise.allSettled([
-    getStats(),
-    getRounds(1, 12, false),
-    getLeaderboardMiners(12),
-    getLeaderboardStakers(12),
-    getLeaderboardLockers(12),
-    getLeaderboardEarners(12),
-    getLockDistributions(1, 12),
-    getLockStats(),
-  ])
+  for (const task of tasks) {
+    try {
+      await task()
+    } catch (error) {
+      console.warn(`[cache-warmer] warm task failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
 }
 
 export async function getLatestRoundTransition() {
