@@ -111,17 +111,46 @@ const responseCache = new Map<string, { expiresAt: number; value: unknown }>()
 const inflightCache = new Map<string, Promise<unknown>>()
 const historicalLogCache = new Map<string, HistoricalLogCacheEntry>()
 const historicalLogInflight = new Map<string, Promise<unknown[]>>()
+const MAX_STALE_CACHE_MS = 5 * 60_000
+const HEAVY_CACHE_MAX_STALE_MS = 15 * 60_000
 
-async function withCache<T>(key: string, ttlMs: number, loader: () => Promise<T>): Promise<T> {
+type CacheOptions = {
+  staleWhileRevalidate?: boolean
+  maxStaleMs?: number
+}
+
+async function withCache<T>(key: string, ttlMs: number, loader: () => Promise<T>, options?: CacheOptions): Promise<T> {
   const now = Date.now()
   const cached = responseCache.get(key)
+  const maxStaleMs = options?.maxStaleMs ?? Math.max(ttlMs * 3, MAX_STALE_CACHE_MS)
+  const canServeStale = !!cached && (now - (cached.expiresAt - ttlMs)) <= maxStaleMs
   if (cached && cached.expiresAt > now) {
     return cached.value as T
   }
 
   const inflight = inflightCache.get(key)
   if (inflight) {
+    if (options?.staleWhileRevalidate && canServeStale) {
+      return cached!.value as T
+    }
     return inflight as Promise<T>
+  }
+
+  if (options?.staleWhileRevalidate && canServeStale) {
+    const refreshPromise = loader()
+      .then((value) => {
+        responseCache.set(key, { expiresAt: Date.now() + ttlMs, value })
+        inflightCache.delete(key)
+        return value
+      })
+      .catch((error) => {
+        inflightCache.delete(key)
+        console.warn(`[cache] background refresh failed for "${key}": ${error instanceof Error ? error.message : String(error)}`)
+        return cached!.value as T
+      })
+
+    inflightCache.set(key, refreshPromise)
+    return cached!.value as T
   }
 
   const promise = loader()
@@ -132,6 +161,10 @@ async function withCache<T>(key: string, ttlMs: number, loader: () => Promise<T>
     })
     .catch((error) => {
       inflightCache.delete(key)
+      if (canServeStale) {
+        console.warn(`[cache] serving stale value for "${key}" after loader failure: ${error instanceof Error ? error.message : String(error)}`)
+        return cached!.value as T
+      }
       throw error
     })
 
