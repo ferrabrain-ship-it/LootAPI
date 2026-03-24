@@ -64,7 +64,11 @@ type LockerStateLog =
   | Log<bigint, number, false, typeof EXTENDED_LOCK_EVENT>
   | Log<bigint, number, false, typeof UNLOCKED_EVENT>
 
-function normalizeAddress(address: string) {
+function normalizeAddress(address: string | undefined, label = 'address') {
+  if (!address) {
+    throw new Error(`Missing ${label} in indexed event log`)
+  }
+
   return getAddress(address)
 }
 
@@ -342,8 +346,8 @@ async function syncDeployments(client: PoolClient, eventName: 'Deployed' | 'Depl
         log.logIndex,
         eventName,
         toBigInt(log.args.roundId).toString(),
-        normalizeAddress(log.args.user),
-        log.eventName === 'DeployedFor' ? normalizeAddress(log.args.executor) : null,
+        normalizeAddress(log.args.user, 'deployment user'),
+        log.eventName === 'DeployedFor' ? normalizeAddress(log.args.executor, 'deployment executor') : null,
         toBigInt(log.args.amountPerBlock).toString(),
         toBigInt(log.args.blockMask).toString(),
         toBigInt(log.args.totalAmount).toString(),
@@ -474,7 +478,7 @@ async function syncCheckpoints(client: PoolClient) {
         log.transactionHash,
         log.logIndex,
         toBigInt(log.args.roundId).toString(),
-        normalizeAddress(log.args.user),
+        normalizeAddress(log.args.user, 'checkpoint user'),
         toBigInt(log.args.ethReward).toString(),
         toBigInt(log.args.lootReward).toString(),
         log.blockNumber.toString(),
@@ -609,7 +613,7 @@ async function syncDirectBurns(client: PoolClient) {
       [
         log.transactionHash,
         log.logIndex,
-        normalizeAddress(log.args.from),
+        normalizeAddress(log.args.from, 'direct burn sender'),
         toBigInt(log.args.value).toString(),
         log.blockNumber.toString(),
         timestampMs,
@@ -653,7 +657,7 @@ async function syncStakeDeposits(client: PoolClient) {
       [
         log.transactionHash,
         log.logIndex,
-        normalizeAddress(log.args.user),
+        normalizeAddress(log.args.user, 'staking deposit user'),
         toBigInt(log.args.amount).toString(),
         toBigInt(log.args.newBalance).toString(),
         log.blockNumber.toString(),
@@ -698,7 +702,7 @@ async function syncStakeWithdrawals(client: PoolClient) {
       [
         log.transactionHash,
         log.logIndex,
-        normalizeAddress(log.args.user),
+        normalizeAddress(log.args.user, 'staking withdrawal user'),
         toBigInt(log.args.amount).toString(),
         toBigInt(log.args.newBalance).toString(),
         log.blockNumber.toString(),
@@ -862,7 +866,7 @@ async function syncLockerState(client: PoolClient, streamName: string, logs: Loc
         log.transactionHash,
         log.logIndex,
         log.eventName,
-        normalizeAddress(log.args.user),
+        normalizeAddress(log.args.user, 'locker event user'),
         toBigInt(log.args.lockId).toString(),
         amountDelta.toString(),
         unlockTime?.toString() ?? null,
