@@ -2318,56 +2318,61 @@ export async function getLockStats() {
 
 export async function getLockDistributions(page = 1, limit = 12) {
   return withCache(`lock-distributions:${page}:${limit}`, HEAVY_ROUTE_CACHE_TTL_MS, async () => {
-    const safePage = Number.isFinite(page) ? Math.max(1, Math.floor(page)) : 1
-    const safeLimit = Number.isFinite(limit) ? Math.max(1, Math.min(Math.floor(limit), 100)) : 12
+    return preferIndexed(
+      () => getIndexedLockDistributions(page, limit),
+      async () => {
+        const safePage = Number.isFinite(page) ? Math.max(1, Math.floor(page)) : 1
+        const safeLimit = Number.isFinite(limit) ? Math.max(1, Math.min(Math.floor(limit), 100)) : 12
 
-    const [logs, snapshot] = await Promise.all([
-      getLockRewardNotifiedLogs(),
-      getLockerSnapshot(),
-    ])
+        const [logs, snapshot] = await Promise.all([
+          getLockRewardNotifiedLogs(),
+          getLockerSnapshot(),
+        ])
 
-    const ordered = [...logs].sort(compareLogsDesc)
-    const total = ordered.length
-    const pages = Math.max(1, Math.ceil(total / safeLimit))
-    const slice = ordered.slice((safePage - 1) * safeLimit, safePage * safeLimit)
+        const ordered = [...logs].sort(compareLogsDesc)
+        const total = ordered.length
+        const pages = Math.max(1, Math.ceil(total / safeLimit))
+        const slice = ordered.slice((safePage - 1) * safeLimit, safePage * safeLimit)
 
-    const lockers = [...snapshot.userLocked.values()].filter((locked) => locked > 0n).length
-    const lockedSupply = [...snapshot.userLocked.values()].reduce((sum, locked) => sum + locked, 0n)
+        const lockers = [...snapshot.userLocked.values()].filter((locked) => locked > 0n).length
+        const lockedSupply = [...snapshot.userLocked.values()].reduce((sum, locked) => sum + locked, 0n)
 
-    const distributions = await Promise.all(
-      slice.map(async (log) => {
-        const timestampMs = await getBlockTimestampMs(getLogBlockNumber(log))
-        const amount = toBigInt(log.args.amount)
-        const distributedAmount = toBigInt(log.args.distributedAmount)
-        const unallocatedAmount = toBigInt(log.args.unallocatedAmount)
+        const distributions = await Promise.all(
+          slice.map(async (log) => {
+            const timestampMs = await getBlockTimestampMs(getLogBlockNumber(log))
+            const amount = toBigInt(log.args.amount)
+            const distributedAmount = toBigInt(log.args.distributedAmount)
+            const unallocatedAmount = toBigInt(log.args.unallocatedAmount)
+
+            return {
+              time: relativeTime(timestampMs),
+              timestamp: new Date(timestampMs).toISOString(),
+              amount: amount.toString(),
+              amountFormatted: etherString(amount),
+              ethDistributed: distributedAmount.toString(),
+              ethDistributedFormatted: etherString(distributedAmount),
+              unallocatedAmount: unallocatedAmount.toString(),
+              unallocatedAmountFormatted: etherString(unallocatedAmount),
+              lockers,
+              lockedSupply: lockedSupply.toString(),
+              lockedSupplyFormatted: etherString(lockedSupply),
+              txHash: log.transactionHash,
+              blockNumber: Number(getLogBlockNumber(log)),
+            }
+          })
+        )
 
         return {
-          time: relativeTime(timestampMs),
-          timestamp: new Date(timestampMs).toISOString(),
-          amount: amount.toString(),
-          amountFormatted: etherString(amount),
-          ethDistributed: distributedAmount.toString(),
-          ethDistributedFormatted: etherString(distributedAmount),
-          unallocatedAmount: unallocatedAmount.toString(),
-          unallocatedAmountFormatted: etherString(unallocatedAmount),
-          lockers,
-          lockedSupply: lockedSupply.toString(),
-          lockedSupplyFormatted: etherString(lockedSupply),
-          txHash: log.transactionHash,
-          blockNumber: Number(getLogBlockNumber(log)),
+          distributions,
+          pagination: {
+            page: safePage,
+            limit: safeLimit,
+            total,
+            pages,
+          },
         }
-      })
+      }
     )
-
-    return {
-      distributions,
-      pagination: {
-        page: safePage,
-        limit: safeLimit,
-        total,
-        pages,
-      },
-    }
   }, {
     staleWhileRevalidate: true,
     maxStaleMs: HEAVY_CACHE_MAX_STALE_MS,
