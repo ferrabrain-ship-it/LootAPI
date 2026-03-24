@@ -1,6 +1,7 @@
 import type { PoolClient } from 'pg'
 import { getAddress, type Address } from 'viem'
-import { PROTOCOL_CONSTANTS } from '../config/contracts.js'
+import gridMiningAbi from '../abis/GridMining.json' with { type: 'json' }
+import { CONTRACTS, PROTOCOL_CONSTANTS } from '../config/contracts.js'
 import { hasProtocolIndexDatabase, getProtocolIndexPool } from '../lib/protocolIndexDb.js'
 import { decodeBlockMask, etherString, relativeTime, safeAddressEq } from '../lib/format.js'
 import { publicClient } from '../lib/client.js'
@@ -13,6 +14,7 @@ const INDEX_TREASURY_MAX_LAG_BLOCKS = 1200n
 const INDEX_UNFORGED_MAX_LAG_BLOCKS = 1200n
 const INDEX_HEAD_CACHE_TTL_MS = 5000
 let latestHeadCache: { expiresAt: number; value: bigint } | null = null
+let currentRoundIdCache: { expiresAt: number; value: bigint } | null = null
 
 type RoundRow = {
   round_id: string
@@ -85,6 +87,33 @@ function toIsoString(value: Date | string | null | undefined) {
   return Number.isFinite(parsed.getTime()) ? parsed.toISOString() : null
 }
 
+async function getLatestHeadBlock() {
+  const now = Date.now()
+  if (latestHeadCache && latestHeadCache.expiresAt > now) {
+    return latestHeadCache.value
+  }
+
+  const latestHead = await publicClient.getBlockNumber()
+  latestHeadCache = { expiresAt: now + INDEX_HEAD_CACHE_TTL_MS, value: latestHead }
+  return latestHead
+}
+
+async function getCurrentRoundId() {
+  const now = Date.now()
+  if (currentRoundIdCache && currentRoundIdCache.expiresAt > now) {
+    return currentRoundIdCache.value
+  }
+
+  const currentRoundId = await publicClient.readContract({
+    address: CONTRACTS.gridMining,
+    abi: gridMiningAbi,
+    functionName: 'currentRoundId',
+  }) as bigint
+
+  currentRoundIdCache = { expiresAt: now + INDEX_HEAD_CACHE_TTL_MS, value: currentRoundId }
+  return currentRoundId
+}
+
 async function withProtocolIndex<T>(
   requiredStreams: string[],
   loader: (client: PoolClient) => Promise<T>,
@@ -130,8 +159,7 @@ async function withProtocolIndex<T>(
       if (latestHeadCache && latestHeadCache.expiresAt > now) {
         latestHead = latestHeadCache.value
       } else {
-        latestHead = await publicClient.getBlockNumber()
-        latestHeadCache = { expiresAt: now + INDEX_HEAD_CACHE_TTL_MS, value: latestHead }
+        latestHead = await getLatestHeadBlock()
       }
 
       const lag = latestHead > minSynced ? latestHead - minSynced : 0n
@@ -423,6 +451,29 @@ export async function getIndexedTreasuryStats() {
     }
   }, {
     maxLagBlocks: INDEX_TREASURY_MAX_LAG_BLOCKS,
+  }).then(async (indexed) => {
+    if (!indexed) return null
+
+    const pool = getProtocolIndexPool()
+    const lagResult = await pool.query<{ latest_block: string }>(`
+      with latest as (
+        select coalesce(max(block_number), 0) as latest_block from protocol_treasury_vault_events
+        union all
+        select coalesce(max(block_number), 0) as latest_block from protocol_treasury_buybacks
+        union all
+        select coalesce(max(block_number), 0) as latest_block from protocol_direct_burns
+      )
+      select coalesce(max(latest_block), 0)::text as latest_block from latest
+    `)
+
+    const latestIndexedBlock = toBigInt(lagResult.rows[0]?.latest_block ?? '0')
+    const latestHead = await getLatestHeadBlock()
+    const lag = latestHead > latestIndexedBlock ? latestHead - latestIndexedBlock : 0n
+    if (lag > INDEX_TREASURY_MAX_LAG_BLOCKS) {
+      return null
+    }
+
+    return indexed
   })
 }
 
@@ -918,8 +969,32 @@ export async function getIndexedRounds(page = 1, limit = 12, lootpotOnly = false
     const total = Number(totalResult.rows[0]?.total ?? '0')
     const pages = Math.max(1, Math.ceil(total / safeLimit))
 
+    const mapped = rows.rows.map((row) => buildRoundFromRows(row, grouped.get(toBigInt(row.round_id)) ?? []))
+
+    if (!lootpotOnly && safePage === 1) {
+      const latestIndexedRoundId = mapped.length > 0 ? BigInt(mapped[0].roundId) : 0n
+      const currentRoundId = await getCurrentRoundId()
+      const latestSettledRoundId = currentRoundId > 0n ? currentRoundId - 1n : 0n
+      const roundLag = latestSettledRoundId > latestIndexedRoundId ? latestSettledRoundId - latestIndexedRoundId : 0n
+      if (roundLag > 25n) {
+        return null
+      }
+    }
+
+    const latestIndexedSettledBlock = rows.rows.reduce((max, row) => {
+      const value = row.settled_block_number ? toBigInt(row.settled_block_number) : 0n
+      return value > max ? value : max
+    }, 0n)
+    if (latestIndexedSettledBlock > 0n) {
+      const latestHead = await getLatestHeadBlock()
+      const lag = latestHead > latestIndexedSettledBlock ? latestHead - latestIndexedSettledBlock : 0n
+      if (lag > INDEX_ROUNDS_MAX_LAG_BLOCKS) {
+        return null
+      }
+    }
+
     return {
-      rounds: rows.rows.map((row) => buildRoundFromRows(row, grouped.get(toBigInt(row.round_id)) ?? [])),
+      rounds: mapped,
       pagination: { page: safePage, limit: safeLimit, total, pages },
     }
   }, {
