@@ -716,6 +716,53 @@ async function syncStakeWithdrawals(client: PoolClient) {
   return { streamName, inserted: logs.length, latestBlock }
 }
 
+async function syncStakeCompounds(client: PoolClient) {
+  const streamName = 'staking_compounds'
+  const lastSyncedBlock = await getLastSyncedBlock(client, streamName)
+  const latestBlock = await withRpcRetries(() => publicClient.getBlockNumber())
+  const fromBlock = lastSyncedBlock + 1n
+  if (fromBlock > latestBlock) return { streamName, inserted: 0, latestBlock }
+
+  const logs = await getLogsPaged({
+    address: CONTRACTS.staking,
+    event: STAKE_COMPOUND_EVENT,
+    fromBlock,
+    toBlock: latestBlock,
+  })
+
+  await upsertRows(logs, ROW_UPSERT_CONCURRENCY, async (log) => {
+    const timestampMs = await getBlockTimestampMs(log.blockNumber)
+    await client.query(
+      `
+        insert into protocol_staking_compounds (
+          tx_hash, log_index, user_address, compounder_address, amount, fee, block_number, block_timestamp
+        )
+        values ($1,$2,$3,$4,$5,$6,$7,to_timestamp($8 / 1000.0))
+        on conflict (tx_hash, log_index) do update
+        set user_address = excluded.user_address,
+            compounder_address = excluded.compounder_address,
+            amount = excluded.amount,
+            fee = excluded.fee,
+            block_number = excluded.block_number,
+            block_timestamp = excluded.block_timestamp
+      `,
+      [
+        log.transactionHash,
+        log.logIndex,
+        normalizeAddress(log.args.user, 'staking compound user'),
+        normalizeAddress(log.args.compounder, 'staking compounder'),
+        toBigInt(log.args.amount).toString(),
+        toBigInt(log.args.fee).toString(),
+        log.blockNumber.toString(),
+        timestampMs,
+      ]
+    )
+  })
+
+  await updateSyncState(client, streamName, latestBlock)
+  return { streamName, inserted: logs.length, latestBlock }
+}
+
 async function syncYieldDistributions(client: PoolClient) {
   const streamName = 'staking_yield_distributions'
   const lastSyncedBlock = await getLastSyncedBlock(client, streamName)
