@@ -112,6 +112,18 @@ create table if not exists protocol_staking_withdrawals (
   primary key (tx_hash, log_index)
 );
 
+create table if not exists protocol_staking_compounds (
+  tx_hash text not null,
+  log_index integer not null,
+  user_address text not null,
+  compounder_address text not null,
+  amount numeric(78,0) not null,
+  fee numeric(78,0) not null,
+  block_number bigint not null,
+  block_timestamp timestamptz,
+  primary key (tx_hash, log_index)
+);
+
 create table if not exists protocol_staking_yield_distributions (
   tx_hash text not null,
   log_index integer not null,
@@ -180,6 +192,9 @@ create index if not exists idx_protocol_staking_deposits_user
 
 create index if not exists idx_protocol_staking_withdrawals_user
   on protocol_staking_withdrawals (user_address, block_number desc, log_index desc);
+
+create index if not exists idx_protocol_staking_compounds_user
+  on protocol_staking_compounds (user_address, block_number desc, log_index desc);
 
 create index if not exists idx_protocol_staking_yield_block
   on protocol_staking_yield_distributions (block_number desc, log_index desc);
