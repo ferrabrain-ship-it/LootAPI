@@ -108,9 +108,11 @@ const MIN_LOG_BLOCK_RANGE = 1_000n
 const GLOBAL_LOG_CACHE_TTL_MS = 60_000
 const HEAVY_ROUTE_CACHE_TTL_MS = 120_000
 const STAKING_APR_WINDOW_DAYS = 7
+const LOG_FETCH_CONCURRENCY = 4
 const RECENT_SETTLED_LOOKBACK = 1_000n
 const RECENT_SETTLED_LIST_LOOKBACK = 5_000n
 const RECENT_DEPLOY_LOOKBACK = 5_000n
+const RECENT_LEADERBOARD_LOOKBACK = 50_000n
 const RPC_RETRY_ATTEMPTS = 3
 const USER_HISTORY_MAX_LIMIT = 200
 const USER_HISTORY_CONCURRENCY = 8
@@ -381,67 +383,83 @@ async function getLogsPaged<TEvent extends AbiEvent | undefined>(
     return []
   }
 
-  const chunks: Log<bigint, number, false, TEvent>[] = []
-  let cursor = startBlock
-  let blockRange = LOG_BLOCK_RANGE
-
-  while (cursor <= latestBlock) {
-    const endBlock = cursor + blockRange - 1n > latestBlock
+  const ranges: Array<{ fromBlock: bigint; toBlock: bigint }> = []
+  for (let cursor = startBlock; cursor <= latestBlock; cursor += LOG_BLOCK_RANGE) {
+    const endBlock = cursor + LOG_BLOCK_RANGE - 1n > latestBlock
       ? latestBlock
-      : cursor + blockRange - 1n
-
-    try {
-      let logs: Log<bigint, number, false, TEvent>[] | null = null
-
-      for (let attempt = 0; attempt < RPC_RETRY_ATTEMPTS; attempt++) {
-        try {
-          logs = await publicClient.getLogs({
-            address: params.address,
-            event: params.event as never,
-            args: params.args as never,
-            fromBlock: cursor,
-            toBlock: endBlock,
-          }) as Log<bigint, number, false, TEvent>[]
-          break
-        } catch (rpcError) {
-          const rpcMessage = rpcError instanceof Error ? rpcError.message : String(rpcError)
-          const isRangeLimitError = isRangeLimitErrorMessage(rpcMessage)
-          const isRetryableRpcError = isRetryableRpcErrorMessage(rpcMessage)
-          const isLastAttempt = attempt >= RPC_RETRY_ATTEMPTS - 1
-
-          if (isRangeLimitError || !isRetryableRpcError || isLastAttempt) {
-            throw rpcError
-          }
-
-          await sleep(120 * (attempt + 1))
-        }
-      }
-
-      if (!logs) {
-        throw new Error('Failed to fetch logs after retries')
-      }
-
-      chunks.push(...logs)
-      cursor = endBlock + 1n
-      if (blockRange < LOG_BLOCK_RANGE) {
-        blockRange = LOG_BLOCK_RANGE
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      const isRangeLimitError = isRangeLimitErrorMessage(message)
-
-      if (!isRangeLimitError || blockRange <= MIN_LOG_BLOCK_RANGE) {
-        throw error
-      }
-
-      blockRange = blockRange / 2n
-      if (blockRange < MIN_LOG_BLOCK_RANGE) {
-        blockRange = MIN_LOG_BLOCK_RANGE
-      }
-    }
+      : cursor + LOG_BLOCK_RANGE - 1n
+    ranges.push({ fromBlock: cursor, toBlock: endBlock })
   }
 
-  return chunks
+  const chunks = await mapWithConcurrency(ranges, LOG_FETCH_CONCURRENCY, async ({ fromBlock, toBlock }) => {
+    return fetchLogsRange(params, fromBlock, toBlock)
+  })
+
+  return chunks.flat()
+}
+
+async function fetchLogsRange<TEvent extends AbiEvent | undefined>(
+  params: {
+    address: Address
+    event: TEvent
+    args?: Record<string, unknown>
+  },
+  fromBlock: bigint,
+  toBlock: bigint
+): Promise<Log<bigint, number, false, TEvent>[]> {
+  try {
+    let logs: Log<bigint, number, false, TEvent>[] | null = null
+
+    for (let attempt = 0; attempt < RPC_RETRY_ATTEMPTS; attempt++) {
+      try {
+        logs = await publicClient.getLogs({
+          address: params.address,
+          event: params.event as never,
+          args: params.args as never,
+          fromBlock,
+          toBlock,
+        }) as Log<bigint, number, false, TEvent>[]
+        break
+      } catch (rpcError) {
+        const rpcMessage = rpcError instanceof Error ? rpcError.message : String(rpcError)
+        const isRangeLimitError = isRangeLimitErrorMessage(rpcMessage)
+        const isRetryableRpcError = isRetryableRpcErrorMessage(rpcMessage)
+        const isLastAttempt = attempt >= RPC_RETRY_ATTEMPTS - 1
+
+        if (isRangeLimitError || !isRetryableRpcError || isLastAttempt) {
+          throw rpcError
+        }
+
+        await sleep(120 * (attempt + 1))
+      }
+    }
+
+    if (!logs) {
+      throw new Error('Failed to fetch logs after retries')
+    }
+
+    return logs
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    const isRangeLimitError = isRangeLimitErrorMessage(message)
+    const blockSpan = toBlock - fromBlock + 1n
+
+    if (!isRangeLimitError || blockSpan <= MIN_LOG_BLOCK_RANGE) {
+      throw error
+    }
+
+    const mid = fromBlock + (blockSpan / 2n) - 1n
+    const leftToBlock = mid < fromBlock ? fromBlock : mid
+    const rightFromBlock = leftToBlock + 1n
+    const [left, right] = await Promise.all([
+      fetchLogsRange(params, fromBlock, leftToBlock),
+      rightFromBlock <= toBlock
+        ? fetchLogsRange(params, rightFromBlock, toBlock)
+        : Promise.resolve([] as Log<bigint, number, false, TEvent>[]),
+    ])
+
+    return [...left, ...right]
+  }
 }
 
 async function getCachedLogsPaged<TEvent extends AbiEvent | undefined>(
@@ -706,6 +724,68 @@ export async function getAllDeploymentLogs() {
   })
 }
 
+async function getDeploymentLogsForUser(address: Address) {
+  const normalized = getAddress(address)
+  return withCache(`logs:grid:deployments:user:${normalized}`, 30_000, async () => {
+    const [direct, delegated] = await Promise.all([
+      getCachedLogsPaged(`grid:deployed:user:${normalized}`, 30_000, {
+        address: CONTRACTS.gridMining,
+        event: DEPLOYED_EVENT,
+        args: { user: normalized },
+        fromBlock: env.scanStartBlock,
+        toBlock: 'latest',
+      }),
+      getCachedLogsPaged(`grid:deployed-for:user:${normalized}`, 30_000, {
+        address: CONTRACTS.gridMining,
+        event: DEPLOYED_FOR_EVENT,
+        args: { user: normalized },
+        fromBlock: env.scanStartBlock,
+        toBlock: 'latest',
+      }),
+    ])
+
+    return [...direct, ...delegated].sort(compareLogsAsc) as DeploymentLog[]
+  }, {
+    staleWhileRevalidate: true,
+    maxStaleMs: 2 * 60_000,
+  })
+}
+
+async function getRecentDeploymentTotals(lookbackBlocks = RECENT_LEADERBOARD_LOOKBACK) {
+  return withCache(`grid:deployments:recent:${lookbackBlocks.toString()}`, 30_000, async () => {
+    const latestBlock = await withRpcRetries(() => publicClient.getBlockNumber())
+    const fromBlock = latestBlock > lookbackBlocks
+      ? latestBlock - lookbackBlocks
+      : env.scanStartBlock
+
+    const [direct, delegated] = await Promise.all([
+      getLogsPaged({
+        address: CONTRACTS.gridMining,
+        event: DEPLOYED_EVENT,
+        fromBlock,
+        toBlock: 'latest',
+      }),
+      getLogsPaged({
+        address: CONTRACTS.gridMining,
+        event: DEPLOYED_FOR_EVENT,
+        fromBlock,
+        toBlock: 'latest',
+      }),
+    ])
+
+    const totalsByUser = new Map<string, bigint>()
+    for (const log of [...direct, ...delegated] as DeploymentLog[]) {
+      const user = normalizeAddress(log.args.user)
+      totalsByUser.set(user, (totalsByUser.get(user) ?? 0n) + toBigInt(log.args.totalAmount))
+    }
+
+    return { totalsByUser, fromBlock, latestBlock }
+  }, {
+    staleWhileRevalidate: true,
+    maxStaleMs: 2 * 60_000,
+  })
+}
+
 async function getDeploymentSnapshot() {
   return withCache('snapshot:grid:deployments', GLOBAL_LOG_CACHE_TTL_MS, async (): Promise<DeploymentSnapshot> => {
     const logs = await getAllDeploymentLogs()
@@ -812,6 +892,39 @@ async function getVaultLogs() {
   })
 }
 
+async function getLatestVaultTotal() {
+  return withCache('treasury:vault:latest-total', 30_000, async () => {
+    const latestBlock = await withRpcRetries(() => publicClient.getBlockNumber())
+    let toBlock = latestBlock
+
+    while (toBlock >= env.scanStartBlock) {
+      const fromBlock = toBlock >= LOG_BLOCK_RANGE
+        ? (toBlock - LOG_BLOCK_RANGE + 1n > env.scanStartBlock ? toBlock - LOG_BLOCK_RANGE + 1n : env.scanStartBlock)
+        : env.scanStartBlock
+      const logs = await fetchLogsRange({
+        address: CONTRACTS.treasury,
+        event: VAULT_EVENT,
+      }, fromBlock, toBlock)
+
+      if (logs.length > 0) {
+        const latest = logs.sort(compareLogsDesc)[0]
+        return toBigInt(latest.args.totalVaulted ?? latest.args.amount)
+      }
+
+      if (fromBlock === env.scanStartBlock) {
+        break
+      }
+
+      toBlock = fromBlock - 1n
+    }
+
+    return 0n
+  }, {
+    staleWhileRevalidate: true,
+    maxStaleMs: HEAVY_CACHE_MAX_STALE_MS,
+  })
+}
+
 async function getBuybackLogs() {
   return getCachedLogsPaged('treasury:buybacks', GLOBAL_LOG_CACHE_TTL_MS, {
     address: CONTRACTS.treasury,
@@ -903,6 +1016,25 @@ async function getCheckpointLogs() {
     event: CHECKPOINTED_EVENT,
     fromBlock: env.scanStartBlock,
     toBlock: 'latest',
+  })
+}
+
+async function getRecentCheckpointLogs() {
+  return withCache('grid:checkpointed:recent', 30_000, async () => {
+    const latestBlock = await withRpcRetries(() => publicClient.getBlockNumber())
+    const recentFromBlock = latestBlock > RECENT_LEADERBOARD_LOOKBACK
+      ? latestBlock - RECENT_LEADERBOARD_LOOKBACK
+      : env.scanStartBlock
+
+    return getLogsPaged({
+      address: CONTRACTS.gridMining,
+      event: CHECKPOINTED_EVENT,
+      fromBlock: recentFromBlock,
+      toBlock: 'latest',
+    })
+  }, {
+    staleWhileRevalidate: true,
+    maxStaleMs: 2 * 60_000,
   })
 }
 
@@ -1593,17 +1725,16 @@ export async function getCopilotContext(lookback = 1000) {
 export async function getTreasuryStats() {
   return withCache('treasury-stats', HEAVY_ROUTE_CACHE_TTL_MS, async () => {
     const status = await getProtocolStatus()
-    const [stats, vaultLogs, standaloneBurnLogs] = await Promise.all([
+    const [stats, totalVaultedLifetime, standaloneBurnLogs] = await Promise.all([
       withRpcRetries(() => publicClient.readContract({
         address: CONTRACTS.treasury,
         abi: treasuryAbi,
         functionName: 'getStats',
       }) as Promise<[bigint, bigint, bigint, bigint]>),
-      status.currentRoundId === 0n ? Promise.resolve([]) : getVaultLogs(),
+      status.currentRoundId === 0n ? Promise.resolve(0n) : getLatestVaultTotal(),
       getStandaloneBurnLogs(),
     ])
 
-    const totalVaultedLifetime = vaultLogs.reduce((sum, log) => sum + toBigInt(log.args.amount), 0n)
     const directBurnedLifetime = standaloneBurnLogs.reduce((sum, log) => sum + toBigInt(log.args.value), 0n)
     const totalBurnedLifetime = stats[1] + directBurnedLifetime
 
@@ -1913,8 +2044,8 @@ export async function getUserHistory(address: Address, limit = 100, roundIdFilte
       }
     }
 
-    const ordered = (await getAllDeploymentLogs())
-      .filter((log) => safeAddressEq(log.args.user, address) && (!roundIdFilter || toBigInt(log.args.roundId) === roundIdFilter))
+    const ordered = (await getDeploymentLogsForUser(address))
+      .filter((log) => !roundIdFilter || toBigInt(log.args.roundId) === roundIdFilter)
       .sort((a, b) =>
       compareLogsDesc(a, b)
     )
@@ -2148,10 +2279,10 @@ export async function getLeaderboardMiners(limit = 12) {
   return withCache(`leaderboard-miners:${limit}`, HEAVY_ROUTE_CACHE_TTL_MS, async () => {
     const status = await getProtocolStatus()
     if (!status.gameStarted || status.currentRoundId === 0n) {
-      return { period: 'all', miners: [], deployers: [] }
+      return { period: 'recent', miners: [], deployers: [] }
     }
 
-    const snapshot = await getDeploymentSnapshot()
+    const snapshot = await getRecentDeploymentTotals()
     const deployers = [...snapshot.totalsByUser.entries()]
         .sort((a, b) => (b[1] > a[1] ? 1 : -1))
         .slice(0, limit)
@@ -2163,7 +2294,7 @@ export async function getLeaderboardMiners(limit = 12) {
         }))
 
     return {
-      period: 'all',
+      period: 'recent',
       miners: deployers,
       deployers,
     }
@@ -2205,7 +2336,7 @@ export async function getLeaderboardEarners(limit = 12) {
       }
     }
 
-    const checkpointLogs = await getCheckpointLogs()
+    const checkpointLogs = await getRecentCheckpointLogs()
     const users = [...new Set(checkpointLogs.map((log) => normalizeAddress(log.args.user)))]
     const rewards = (await mapWithConcurrency(users, LEADERBOARD_EARNERS_CONCURRENCY, async (address) => {
       try {
@@ -2247,16 +2378,13 @@ export async function warmProtocolCaches() {
     () => getProtocolStatus(),
     () => getRoundSettledLogs(),
     () => getRecentRoundSettledLogs(),
-    () => getDeploymentSnapshot(),
     () => getStakeSnapshot(),
-    () => getCheckpointLogs(),
     () => getLockerSnapshot(),
     () => getLockRewardNotifiedLogs(),
-    () => getVaultLogs(),
-    () => getStandaloneBurnLogs(),
     () => getStats(),
     () => getRounds(1, 12, false),
     () => getLeaderboardMiners(12),
+    () => getLeaderboardEarners(12),
     () => getLeaderboardStakers(12),
     () => getLeaderboardLockers(12),
     () => getLockDistributions(1, 12),
