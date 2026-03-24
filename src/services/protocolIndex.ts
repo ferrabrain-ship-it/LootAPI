@@ -3,10 +3,16 @@ import { getAddress, type Address } from 'viem'
 import { PROTOCOL_CONSTANTS } from '../config/contracts.js'
 import { hasProtocolIndexDatabase, getProtocolIndexPool } from '../lib/protocolIndexDb.js'
 import { decodeBlockMask, etherString, relativeTime, safeAddressEq } from '../lib/format.js'
+import { publicClient } from '../lib/client.js'
 
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000'
 const ONE_ADDRESS = '0x0000000000000000000000000000000000000001'
 const STAKING_APR_WINDOW_DAYS = 7
+const INDEX_ROUNDS_MAX_LAG_BLOCKS = 900n
+const INDEX_TREASURY_MAX_LAG_BLOCKS = 1200n
+const INDEX_UNFORGED_MAX_LAG_BLOCKS = 1200n
+const INDEX_HEAD_CACHE_TTL_MS = 5000
+let latestHeadCache: { expiresAt: number; value: bigint } | null = null
 
 type RoundRow = {
   round_id: string
@@ -61,6 +67,11 @@ type CheckpointAggRow = {
   gross: string
 }
 
+type SyncStateRow = {
+  stream_name: string
+  last_synced_block: string
+}
+
 function toBigInt(value: string | number | bigint | null | undefined) {
   if (value == null) return 0n
   if (typeof value === 'bigint') return value
@@ -76,7 +87,10 @@ function toIsoString(value: Date | string | null | undefined) {
 
 async function withProtocolIndex<T>(
   requiredStreams: string[],
-  loader: (client: PoolClient) => Promise<T>
+  loader: (client: PoolClient) => Promise<T>,
+  options?: {
+    maxLagBlocks?: bigint
+  }
 ): Promise<T | null> {
   if (!hasProtocolIndexDatabase()) return null
 
@@ -84,13 +98,44 @@ async function withProtocolIndex<T>(
   const client = await pool.connect()
 
   try {
-    const result = await client.query<{ stream_name: string }>(
-      'select stream_name from protocol_sync_state where stream_name = any($1::text[])',
+    const result = await client.query<SyncStateRow>(
+      `
+        select stream_name, last_synced_block::text
+        from protocol_sync_state
+        where stream_name = any($1::text[])
+      `,
       [requiredStreams]
     )
-    const available = new Set(result.rows.map((row) => row.stream_name))
+    const rowsByStream = new Map(result.rows.map((row) => [row.stream_name, row.last_synced_block]))
     for (const stream of requiredStreams) {
-      if (!available.has(stream)) {
+      if (!rowsByStream.has(stream)) {
+        return null
+      }
+    }
+
+    if (options?.maxLagBlocks !== undefined) {
+      let minSynced: bigint | null = null
+      for (const stream of requiredStreams) {
+        const block = BigInt(rowsByStream.get(stream) ?? '0')
+        if (minSynced === null || block < minSynced) {
+          minSynced = block
+        }
+      }
+      if (minSynced === null) {
+        return null
+      }
+
+      const now = Date.now()
+      let latestHead: bigint
+      if (latestHeadCache && latestHeadCache.expiresAt > now) {
+        latestHead = latestHeadCache.value
+      } else {
+        latestHead = await publicClient.getBlockNumber()
+        latestHeadCache = { expiresAt: now + INDEX_HEAD_CACHE_TTL_MS, value: latestHead }
+      }
+
+      const lag = latestHead > minSynced ? latestHead - minSynced : 0n
+      if (lag > options.maxLagBlocks) {
         return null
       }
     }
@@ -376,6 +421,8 @@ export async function getIndexedTreasuryStats() {
       totalDistributedToStakersFormatted: etherString(toBigInt(row.total_distributed_to_stakers)),
       totalBuybacks: Number(row.total_buybacks),
     }
+  }, {
+    maxLagBlocks: INDEX_TREASURY_MAX_LAG_BLOCKS,
   })
 }
 
@@ -744,16 +791,39 @@ export async function getIndexedLeaderboardLockers(limit = 12) {
 }
 
 export async function getIndexedLeaderboardEarners(limit = 12) {
-  return withProtocolIndex(['checkpoints'], async (client) => {
+  return withProtocolIndex(['checkpoints', 'claimed_loot'], async (client) => {
     const result = await client.query<CheckpointAggRow>(
       `
+        with checkpoint_totals as (
+          select
+            user_address,
+            coalesce(sum(loot_reward), 0) as total_checkpoint_loot
+          from protocol_checkpoints
+          group by user_address
+        ),
+        claimed_totals as (
+          select
+            user_address,
+            coalesce(sum(mined_loot), 0) as total_claimed_mined
+          from protocol_claimed_loot
+          group by user_address
+        ),
+        pending as (
+          select
+            coalesce(c.user_address, cl.user_address) as address,
+            greatest(
+              coalesce(c.total_checkpoint_loot, 0) - coalesce(cl.total_claimed_mined, 0),
+              0
+            ) as unforged_pending
+          from checkpoint_totals c
+          full outer join claimed_totals cl on cl.user_address = c.user_address
+        )
         select
-          user_address as address,
-          sum(loot_reward)::text as gross
-        from protocol_checkpoints
-        group by user_address
-        having sum(loot_reward) > 0
-        order by sum(loot_reward) desc
+          address,
+          unforged_pending::text as gross
+        from pending
+        where unforged_pending > 0
+        order by unforged_pending desc
         limit $1
       `,
       [limit]
@@ -771,6 +841,8 @@ export async function getIndexedLeaderboardEarners(limit = 12) {
       earners,
       pagination: { page: 1, limit, total: earners.length, pages: 1 },
     }
+  }, {
+    maxLagBlocks: INDEX_UNFORGED_MAX_LAG_BLOCKS,
   })
 }
 
@@ -850,6 +922,8 @@ export async function getIndexedRounds(page = 1, limit = 12, lootpotOnly = false
       rounds: rows.rows.map((row) => buildRoundFromRows(row, grouped.get(toBigInt(row.round_id)) ?? [])),
       pagination: { page: safePage, limit: safeLimit, total, pages },
     }
+  }, {
+    maxLagBlocks: INDEX_ROUNDS_MAX_LAG_BLOCKS,
   })
 }
 
