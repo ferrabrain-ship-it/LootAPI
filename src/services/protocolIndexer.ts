@@ -969,6 +969,7 @@ export async function runProtocolIndexSyncOnce(options?: {
     results.push(await syncDirectBurns(client))
     results.push(await syncStakeDeposits(client))
     results.push(await syncStakeWithdrawals(client))
+    results.push(await syncStakeCompounds(client))
     results.push(await syncYieldDistributions(client))
     results.push(await syncLockRewards(client))
     results.push(await syncLockerStateEvent(client, 'locker_locked', LOCKED_EVENT))
