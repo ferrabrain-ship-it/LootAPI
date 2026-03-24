@@ -73,6 +73,17 @@ type CurrentRoundCache = {
   lastScannedBlock: bigint
   blocks: CurrentRoundBlockState[]
 }
+type CurrentRoundBase = {
+  roundId: string
+  startTime: number
+  endTime: number
+  totalDeployed: string
+  totalDeployedFormatted: string
+  lootpotPool: string
+  lootpotPoolFormatted: string
+  settled: boolean
+  blocks: ReturnType<typeof formatCurrentRoundBlocks>
+}
 type LockerSnapshot = {
   userLocked: Map<string, bigint>
   userWeight: Map<string, bigint>
@@ -113,13 +124,48 @@ const historicalLogCache = new Map<string, HistoricalLogCacheEntry>()
 const historicalLogInflight = new Map<string, Promise<unknown[]>>()
 const MAX_STALE_CACHE_MS = 5 * 60_000
 const HEAVY_CACHE_MAX_STALE_MS = 15 * 60_000
+const MAX_RESPONSE_CACHE_KEYS = 2_000
+const MAX_HISTORICAL_LOG_CACHE_KEYS = 128
+const MAX_BLOCK_TIMESTAMP_CACHE_KEYS = 20_000
+let cacheOpCount = 0
 
 type CacheOptions = {
   staleWhileRevalidate?: boolean
   maxStaleMs?: number
 }
 
+function pruneMapBySize<K, V>(map: Map<K, V>, maxSize: number) {
+  while (map.size > maxSize) {
+    const oldestKey = map.keys().next().value
+    if (oldestKey === undefined) break
+    map.delete(oldestKey)
+  }
+}
+
+function pruneCaches(now = Date.now()) {
+  for (const [key, cached] of responseCache.entries()) {
+    if (cached.expiresAt + MAX_STALE_CACHE_MS < now && !inflightCache.has(key)) {
+      responseCache.delete(key)
+    }
+  }
+
+  for (const [key, cached] of historicalLogCache.entries()) {
+    if (cached.expiresAt < now && !historicalLogInflight.has(key)) {
+      historicalLogCache.delete(key)
+    }
+  }
+
+  pruneMapBySize(responseCache, MAX_RESPONSE_CACHE_KEYS)
+  pruneMapBySize(historicalLogCache, MAX_HISTORICAL_LOG_CACHE_KEYS)
+  pruneMapBySize(blockTimestampCache, MAX_BLOCK_TIMESTAMP_CACHE_KEYS)
+}
+
 async function withCache<T>(key: string, ttlMs: number, loader: () => Promise<T>, options?: CacheOptions): Promise<T> {
+  cacheOpCount += 1
+  if (cacheOpCount % 64 === 0) {
+    pruneCaches()
+  }
+
   const now = Date.now()
   const cached = responseCache.get(key)
   const maxStaleMs = options?.maxStaleMs ?? Math.max(ttlMs * 3, MAX_STALE_CACHE_MS)
@@ -186,6 +232,7 @@ async function getBlockTimestampMs(blockNumber: bigint): Promise<number> {
   const block = await withRpcRetries(() => publicClient.getBlock({ blockNumber }))
   const ts = Number(block.timestamp) * 1000
   blockTimestampCache.set(key, ts)
+  pruneMapBySize(blockTimestampCache, MAX_BLOCK_TIMESTAMP_CACHE_KEYS)
   return ts
 }
 
@@ -1052,11 +1099,7 @@ function computeUserDeployed(mask: bigint, amountPerBlock: bigint) {
 }
 
 export async function getCurrentRound(user?: string) {
-  const cacheKey = user && isAddress(user)
-    ? `current-round:${getAddress(user)}`
-    : 'current-round'
-
-  return withCache(cacheKey, 2_000, async () => {
+  const baseRound = await withCache('current-round:shared', 2_000, async (): Promise<CurrentRoundBase> => {
     const [roundInfo, lootpotPool] = await Promise.all([
       withRpcRetries(() => publicClient.readContract({
         address: CONTRACTS.gridMining,
@@ -1087,23 +1130,10 @@ export async function getCurrentRound(user?: string) {
           deployedFormatted: '0',
           minerCount: 0,
         })),
-        userDeployed: '0',
-        userDeployedFormatted: '0',
       }
     }
 
     const blocks = await getCurrentRoundBlocks(roundId)
-
-    let userDeployed = 0n
-    if (user && isAddress(user)) {
-      const minerInfo = await withRpcRetries(() => publicClient.readContract({
-        address: CONTRACTS.gridMining,
-        abi: gridMiningAbi,
-        functionName: 'getMinerInfo',
-        args: [roundId, getAddress(user)],
-      }) as Promise<[bigint, bigint, boolean]>)
-      userDeployed = computeUserDeployed(minerInfo[0], minerInfo[1])
-    }
 
     return {
       roundId: roundId.toString(),
@@ -1115,9 +1145,37 @@ export async function getCurrentRound(user?: string) {
       lootpotPoolFormatted: etherString(lootpotPool),
       settled: false,
       blocks,
+    }
+  }, {
+    staleWhileRevalidate: true,
+    maxStaleMs: 30_000,
+  })
+
+  if (!user || !isAddress(user) || baseRound.roundId === '0') {
+    return {
+      ...baseRound,
+      userDeployed: '0',
+      userDeployedFormatted: '0',
+    }
+  }
+
+  return withCache(`current-round:user:${getAddress(user)}`, 2_000, async () => {
+    const minerInfo = await withRpcRetries(() => publicClient.readContract({
+      address: CONTRACTS.gridMining,
+      abi: gridMiningAbi,
+      functionName: 'getMinerInfo',
+      args: [BigInt(baseRound.roundId), getAddress(user)],
+    }) as Promise<[bigint, bigint, boolean]>)
+    const userDeployed = computeUserDeployed(minerInfo[0], minerInfo[1])
+
+    return {
+      ...baseRound,
       userDeployed: userDeployed.toString(),
       userDeployedFormatted: etherString(userDeployed),
     }
+  }, {
+    staleWhileRevalidate: true,
+    maxStaleMs: 30_000,
   })
 }
 
@@ -1683,7 +1741,7 @@ export async function getStakingStats() {
 }
 
 export async function getUserStake(address: Address) {
-  return withCache(`user-stake:${address}`, 15_000, async () => {
+  return withCache(`user-stake:${address}`, 20_000, async () => {
     const [stakeInfo, pendingRewards] = await Promise.all([
       withRpcRetries(() => publicClient.readContract({
         address: CONTRACTS.staking,
@@ -1718,7 +1776,7 @@ export async function getUserStake(address: Address) {
 }
 
 export async function getUserRewards(address: Address) {
-  return withCache(`user-rewards:${address}`, 15_000, async () => {
+  return withCache(`user-rewards:${address}`, 20_000, async () => {
     const [pending, pendingLoot] = await Promise.all([
       withRpcRetries(() => publicClient.readContract({
         address: CONTRACTS.gridMining,
@@ -1765,9 +1823,9 @@ export async function getUserRewards(address: Address) {
 }
 
 export async function getAutoMine(address: Address) {
-  return withCache(`automine:${address}`, 10_000, async () => {
+  return withCache(`automine:${address}`, 20_000, async () => {
     const [state, progress] = await Promise.all([
-      publicClient.readContract({
+      withRpcRetries(() => publicClient.readContract({
         address: CONTRACTS.autoMiner,
         abi: autoMinerAbi,
         functionName: 'getUserState',
@@ -1790,13 +1848,13 @@ export async function getAutoMine(address: Address) {
         bigint,
         bigint,
         bigint,
-      ]>,
-      publicClient.readContract({
+      ]>),
+      withRpcRetries(() => publicClient.readContract({
         address: CONTRACTS.autoMiner,
         abi: autoMinerAbi,
         functionName: 'getConfigProgress',
         args: [address],
-      }) as Promise<[boolean, bigint, bigint, bigint, bigint]>,
+      }) as Promise<[boolean, bigint, bigint, bigint, bigint]>),
     ])
 
     const [config, lastRound, costPerRound, roundsRemaining, totalRefundable] = state
@@ -1830,6 +1888,9 @@ export async function getAutoMine(address: Address) {
         percentComplete: Number(progress[4]),
       },
     }
+  }, {
+    staleWhileRevalidate: true,
+    maxStaleMs: 2 * 60_000,
   })
 }
 
