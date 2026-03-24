@@ -470,7 +470,7 @@ export async function getIndexedBuybacks(page = 1, limit = 12) {
 }
 
 export async function getIndexedStakingSnapshot() {
-  return withProtocolIndex(['staking_deposits', 'staking_withdrawals', 'staking_yield_distributions'], async (client) => {
+  return withProtocolIndex(['staking_deposits', 'staking_withdrawals', 'staking_compounds', 'staking_yield_distributions'], async (client) => {
     const result = await client.query<{
       total_staked: string
       total_yield_distributed: string
@@ -479,6 +479,8 @@ export async function getIndexedStakingSnapshot() {
       `
         with deltas as (
           select user_address, amount as delta_amount from protocol_staking_deposits
+          union all
+          select user_address, amount as delta_amount from protocol_staking_compounds
           union all
           select user_address, -amount as delta_amount from protocol_staking_withdrawals
         ),
@@ -659,7 +661,7 @@ export async function getIndexedLeaderboardMiners(limit = 12) {
 }
 
 export async function getIndexedLeaderboardStakers(limit = 12) {
-  return withProtocolIndex(['staking_deposits', 'staking_withdrawals'], async (client) => {
+  return withProtocolIndex(['staking_deposits', 'staking_withdrawals', 'staking_compounds'], async (client) => {
     const result = await client.query<{
       address: string
       staked_balance: string
@@ -667,6 +669,8 @@ export async function getIndexedLeaderboardStakers(limit = 12) {
       `
         with deltas as (
           select user_address, amount as delta_amount from protocol_staking_deposits
+          union all
+          select user_address, amount as delta_amount from protocol_staking_compounds
           union all
           select user_address, -amount as delta_amount from protocol_staking_withdrawals
         )
