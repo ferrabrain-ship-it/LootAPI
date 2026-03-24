@@ -1860,6 +1860,7 @@ export async function getBuybacks(page = 1, limit = 12) {
             txHash: log.transactionHash,
             blockNumber: Number(log.blockNumber),
             timestamp: new Date(timestampMs).toISOString(),
+            burnedBy: undefined,
           }
         }
 
