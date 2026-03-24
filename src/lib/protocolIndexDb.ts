@@ -58,6 +58,19 @@ create table if not exists protocol_checkpoints (
   primary key (tx_hash, log_index)
 );
 
+create table if not exists protocol_claimed_loot (
+  tx_hash text not null,
+  log_index integer not null,
+  user_address text not null,
+  mined_loot numeric(78,0) not null,
+  forged_loot numeric(78,0) not null,
+  fee numeric(78,0) not null,
+  net numeric(78,0) not null,
+  block_number bigint not null,
+  block_timestamp timestamptz,
+  primary key (tx_hash, log_index)
+);
+
 create table if not exists protocol_treasury_vault_events (
   tx_hash text not null,
   log_index integer not null,
@@ -177,6 +190,9 @@ create index if not exists idx_protocol_deployments_user_round
 
 create index if not exists idx_protocol_checkpoints_user_block
   on protocol_checkpoints (user_address, block_number desc, log_index desc);
+
+create index if not exists idx_protocol_claimed_loot_user_block
+  on protocol_claimed_loot (user_address, block_number desc, log_index desc);
 
 create index if not exists idx_protocol_treasury_buybacks_block
   on protocol_treasury_buybacks (block_number desc, log_index desc);
