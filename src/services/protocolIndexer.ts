@@ -304,6 +304,11 @@ async function upsertRows<T>(
   })
 }
 
+async function runWriteQuery(query: string, values: unknown[]) {
+  const pool = getProtocolIndexPool()
+  await pool.query(query, values)
+}
+
 async function syncDeployments(client: PoolClient, eventName: 'Deployed' | 'DeployedFor') {
   const streamName = eventName === 'Deployed' ? 'deployments_direct' : 'deployments_for'
   const event = eventName === 'Deployed' ? DEPLOYED_EVENT : DEPLOYED_FOR_EVENT
@@ -324,7 +329,7 @@ async function syncDeployments(client: PoolClient, eventName: 'Deployed' | 'Depl
 
   await upsertRows(logs, ROW_UPSERT_CONCURRENCY, async (log) => {
     const timestampMs = await getBlockTimestampMs(log.blockNumber)
-    await client.query(
+    await runWriteQuery(
       `
         insert into protocol_deployments (
           tx_hash, log_index, event_name, round_id, user_address, executor_address,
@@ -389,7 +394,7 @@ async function syncRoundSettled(client: PoolClient) {
       args: [roundId],
     }) as Promise<[bigint, bigint, bigint, bigint, bigint, number, Address, bigint, bigint, bigint, bigint, boolean, bigint]>)
 
-    await client.query(
+    await runWriteQuery(
       `
         insert into protocol_rounds (
           round_id, start_time, end_time, total_deployed, total_winnings, winners_deployed,
@@ -461,7 +466,7 @@ async function syncCheckpoints(client: PoolClient) {
 
   await upsertRows(logs, ROW_UPSERT_CONCURRENCY, async (log) => {
     const timestampMs = await getBlockTimestampMs(log.blockNumber)
-    await client.query(
+    await runWriteQuery(
       `
         insert into protocol_checkpoints (
           tx_hash, log_index, round_id, user_address, eth_reward, loot_reward, block_number, block_timestamp
@@ -508,7 +513,7 @@ async function syncVaultEvents(client: PoolClient) {
 
   await upsertRows(logs, ROW_UPSERT_CONCURRENCY, async (log) => {
     const timestampMs = await getBlockTimestampMs(log.blockNumber)
-    await client.query(
+    await runWriteQuery(
       `
         insert into protocol_treasury_vault_events (
           tx_hash, log_index, amount, total_vaulted, block_number, block_timestamp
@@ -551,7 +556,7 @@ async function syncBuybacks(client: PoolClient) {
 
   await upsertRows(logs, ROW_UPSERT_CONCURRENCY, async (log) => {
     const timestampMs = await getBlockTimestampMs(log.blockNumber)
-    await client.query(
+    await runWriteQuery(
       `
         insert into protocol_treasury_buybacks (
           tx_hash, log_index, eth_spent, loot_received, loot_burned, loot_to_stakers, block_number, block_timestamp
@@ -599,7 +604,7 @@ async function syncDirectBurns(client: PoolClient) {
 
   await upsertRows(logs, ROW_UPSERT_CONCURRENCY, async (log) => {
     const timestampMs = await getBlockTimestampMs(log.blockNumber)
-    await client.query(
+    await runWriteQuery(
       `
         insert into protocol_direct_burns (
           tx_hash, log_index, from_address, value, block_number, block_timestamp
@@ -642,7 +647,7 @@ async function syncStakeDeposits(client: PoolClient) {
 
   await upsertRows(logs, ROW_UPSERT_CONCURRENCY, async (log) => {
     const timestampMs = await getBlockTimestampMs(log.blockNumber)
-    await client.query(
+    await runWriteQuery(
       `
         insert into protocol_staking_deposits (
           tx_hash, log_index, user_address, amount, new_balance, block_number, block_timestamp
@@ -687,7 +692,7 @@ async function syncStakeWithdrawals(client: PoolClient) {
 
   await upsertRows(logs, ROW_UPSERT_CONCURRENCY, async (log) => {
     const timestampMs = await getBlockTimestampMs(log.blockNumber)
-    await client.query(
+    await runWriteQuery(
       `
         insert into protocol_staking_withdrawals (
           tx_hash, log_index, user_address, amount, new_balance, block_number, block_timestamp
@@ -732,7 +737,7 @@ async function syncStakeCompounds(client: PoolClient) {
 
   await upsertRows(logs, ROW_UPSERT_CONCURRENCY, async (log) => {
     const timestampMs = await getBlockTimestampMs(log.blockNumber)
-    await client.query(
+    await runWriteQuery(
       `
         insert into protocol_staking_compounds (
           tx_hash, log_index, user_address, compounder_address, amount, fee, block_number, block_timestamp
@@ -779,7 +784,7 @@ async function syncYieldDistributions(client: PoolClient) {
 
   await upsertRows(logs, ROW_UPSERT_CONCURRENCY, async (log) => {
     const timestampMs = await getBlockTimestampMs(log.blockNumber)
-    await client.query(
+    await runWriteQuery(
       `
         insert into protocol_staking_yield_distributions (
           tx_hash, log_index, amount, new_acc_yield_per_share, block_number, block_timestamp
@@ -822,7 +827,7 @@ async function syncLockRewards(client: PoolClient) {
 
   await upsertRows(logs, ROW_UPSERT_CONCURRENCY, async (log) => {
     const timestampMs = await getBlockTimestampMs(log.blockNumber)
-    await client.query(
+    await runWriteQuery(
       `
         insert into protocol_lock_reward_notified (
           tx_hash, log_index, amount, distributed_amount, unallocated_amount,
@@ -891,7 +896,7 @@ async function syncLockerState(client: PoolClient, streamName: string, logs: Loc
       newTotalWeight = toBigInt(log.args.newTotalWeight)
     }
 
-    await client.query(
+    await runWriteQuery(
       `
         insert into protocol_locker_events (
           tx_hash, log_index, event_name, user_address, lock_id, amount_delta,
@@ -959,23 +964,37 @@ export async function runProtocolIndexSyncOnce(options?: {
 
   try {
     const results: Array<{ streamName: string; inserted: number; latestBlock: bigint }> = []
+    const runStream = async (
+      label: string,
+      syncer: () => Promise<{ streamName: string; inserted: number; latestBlock: bigint }>
+    ) => {
+      const startedAt = Date.now()
+      logger.info(`[protocol-indexer] syncing ${label}...`)
+      const result = await syncer()
+      logger.info(`[protocol-indexer] synced ${label}`, {
+        inserted: result.inserted,
+        latestBlock: result.latestBlock.toString(),
+        durationMs: Date.now() - startedAt,
+      })
+      results.push(result)
+    }
 
-    results.push(await syncRoundSettled(client))
-    results.push(await syncDeployments(client, 'Deployed'))
-    results.push(await syncDeployments(client, 'DeployedFor'))
-    results.push(await syncCheckpoints(client))
-    results.push(await syncVaultEvents(client))
-    results.push(await syncBuybacks(client))
-    results.push(await syncDirectBurns(client))
-    results.push(await syncStakeDeposits(client))
-    results.push(await syncStakeWithdrawals(client))
-    results.push(await syncStakeCompounds(client))
-    results.push(await syncYieldDistributions(client))
-    results.push(await syncLockRewards(client))
-    results.push(await syncLockerStateEvent(client, 'locker_locked', LOCKED_EVENT))
-    results.push(await syncLockerStateEvent(client, 'locker_added', ADDED_TO_LOCK_EVENT))
-    results.push(await syncLockerStateEvent(client, 'locker_extended', EXTENDED_LOCK_EVENT))
-    results.push(await syncLockerStateEvent(client, 'locker_unlocked', UNLOCKED_EVENT))
+    await runStream('rounds', () => syncRoundSettled(client))
+    await runStream('deployments_direct', () => syncDeployments(client, 'Deployed'))
+    await runStream('deployments_for', () => syncDeployments(client, 'DeployedFor'))
+    await runStream('checkpoints', () => syncCheckpoints(client))
+    await runStream('treasury_vault', () => syncVaultEvents(client))
+    await runStream('treasury_buybacks', () => syncBuybacks(client))
+    await runStream('direct_burns', () => syncDirectBurns(client))
+    await runStream('staking_deposits', () => syncStakeDeposits(client))
+    await runStream('staking_withdrawals', () => syncStakeWithdrawals(client))
+    await runStream('staking_compounds', () => syncStakeCompounds(client))
+    await runStream('staking_yield_distributions', () => syncYieldDistributions(client))
+    await runStream('lock_reward_notified', () => syncLockRewards(client))
+    await runStream('locker_locked', () => syncLockerStateEvent(client, 'locker_locked', LOCKED_EVENT))
+    await runStream('locker_added', () => syncLockerStateEvent(client, 'locker_added', ADDED_TO_LOCK_EVENT))
+    await runStream('locker_extended', () => syncLockerStateEvent(client, 'locker_extended', EXTENDED_LOCK_EVENT))
+    await runStream('locker_unlocked', () => syncLockerStateEvent(client, 'locker_unlocked', UNLOCKED_EVENT))
 
     const latestSyncedBlock = results.reduce((max, result) => (
       result.latestBlock > max ? result.latestBlock : max

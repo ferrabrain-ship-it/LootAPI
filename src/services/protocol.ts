@@ -129,6 +129,8 @@ const RECENT_SETTLED_LOOKBACK = 1_000n
 const RECENT_SETTLED_LIST_LOOKBACK = 5_000n
 const RECENT_DEPLOY_LOOKBACK = 5_000n
 const RECENT_LEADERBOARD_LOOKBACK = 10_000n
+const CHAIN_FALLBACK_HISTORY_WINDOW_ROUNDS = 60n
+const CHAIN_FALLBACK_HISTORY_LOOKBACK_BLOCKS = 2_000n
 const RPC_RETRY_ATTEMPTS = 3
 const USER_HISTORY_MAX_LIMIT = 200
 const USER_HISTORY_CONCURRENCY = 8
@@ -247,6 +249,20 @@ async function preferIndexed<T>(indexedLoader: () => Promise<T | null>, fallback
   }
 
   return fallbackLoader()
+}
+
+function getChainFallbackMinSettledRound(currentRoundId: bigint) {
+  if (currentRoundId <= 1n) return 1n
+  const latestSettledRoundId = currentRoundId - 1n
+  return latestSettledRoundId >= CHAIN_FALLBACK_HISTORY_WINDOW_ROUNDS
+    ? latestSettledRoundId - CHAIN_FALLBACK_HISTORY_WINDOW_ROUNDS + 1n
+    : 1n
+}
+
+function isWithinChainFallbackWindow(roundId: bigint, currentRoundId: bigint) {
+  if (currentRoundId <= 1n) return false
+  const latestSettledRoundId = currentRoundId - 1n
+  return roundId >= getChainFallbackMinSettledRound(currentRoundId) && roundId <= latestSettledRoundId
 }
 
 function normalizeAddress(value: unknown): Address {
@@ -784,6 +800,38 @@ async function getDeploymentLogsForUser(address: Address) {
   })
 }
 
+async function getRecentDeploymentLogsForUser(address: Address, lookbackBlocks = CHAIN_FALLBACK_HISTORY_LOOKBACK_BLOCKS) {
+  const normalized = getAddress(address)
+  return withCache(`logs:grid:deployments:user:${normalized}:recent:${lookbackBlocks.toString()}`, 15_000, async () => {
+    const latestBlock = await withRpcRetries(() => publicClient.getBlockNumber())
+    const fromBlock = latestBlock > lookbackBlocks
+      ? latestBlock - lookbackBlocks
+      : env.scanStartBlock
+
+    const [direct, delegated] = await Promise.all([
+      getLogsPaged({
+        address: CONTRACTS.gridMining,
+        event: DEPLOYED_EVENT,
+        args: { user: normalized },
+        fromBlock,
+        toBlock: 'latest',
+      }),
+      getLogsPaged({
+        address: CONTRACTS.gridMining,
+        event: DEPLOYED_FOR_EVENT,
+        args: { user: normalized },
+        fromBlock,
+        toBlock: 'latest',
+      }),
+    ])
+
+    return [...direct, ...delegated].sort(compareLogsAsc) as DeploymentLog[]
+  }, {
+    staleWhileRevalidate: true,
+    maxStaleMs: 60_000,
+  })
+}
+
 async function getRecentDeploymentTotals(lookbackBlocks = RECENT_LEADERBOARD_LOOKBACK) {
   return withCache(`grid:deployments:recent:${lookbackBlocks.toString()}`, 30_000, async () => {
     const latestBlock = await withRpcRetries(() => publicClient.getBlockNumber())
@@ -853,11 +901,11 @@ async function getRoundSettledLogs() {
   }) as Promise<RoundSettledLog[]>
 }
 
-async function getRecentRoundSettledLogs() {
-  return withCache('logs:grid:round-settled:recent', 15_000, async () => {
+async function getRecentRoundSettledLogs(lookbackBlocks = RECENT_SETTLED_LIST_LOOKBACK) {
+  return withCache(`logs:grid:round-settled:recent:${lookbackBlocks.toString()}`, 15_000, async () => {
     const latestBlock = await withRpcRetries(() => publicClient.getBlockNumber())
-    const recentFromBlock = latestBlock > RECENT_SETTLED_LIST_LOOKBACK
-      ? latestBlock - RECENT_SETTLED_LIST_LOOKBACK
+    const recentFromBlock = latestBlock > lookbackBlocks
+      ? latestBlock - lookbackBlocks
       : env.scanStartBlock
 
     return getLogsPaged({
@@ -967,6 +1015,25 @@ async function getBuybackLogs() {
   })
 }
 
+async function getRecentBuybackLogs(lookbackBlocks = CHAIN_FALLBACK_HISTORY_LOOKBACK_BLOCKS) {
+  return withCache(`treasury:buybacks:recent:${lookbackBlocks.toString()}`, 30_000, async () => {
+    const latestBlock = await withRpcRetries(() => publicClient.getBlockNumber())
+    const fromBlock = latestBlock > lookbackBlocks
+      ? latestBlock - lookbackBlocks
+      : env.scanStartBlock
+
+    return getLogsPaged({
+      address: CONTRACTS.treasury,
+      event: BUYBACK_EVENT,
+      fromBlock,
+      toBlock: 'latest',
+    })
+  }, {
+    staleWhileRevalidate: true,
+    maxStaleMs: 60_000,
+  })
+}
+
 async function getDirectBurnLogs() {
   return getCachedLogsPaged('loot:burns', GLOBAL_LOG_CACHE_TTL_MS, {
     address: CONTRACTS.loot,
@@ -991,6 +1058,37 @@ async function getStandaloneBurnLogs() {
     return burnLogs
       .filter((log) => !buybackTxHashes.has(log.transactionHash.toLowerCase()))
       .sort(compareLogsDesc)
+  })
+}
+
+async function getRecentStandaloneBurnLogs(lookbackBlocks = CHAIN_FALLBACK_HISTORY_LOOKBACK_BLOCKS) {
+  return withCache(`loot:standalone-burns:recent:${lookbackBlocks.toString()}`, 30_000, async () => {
+    const latestBlock = await withRpcRetries(() => publicClient.getBlockNumber())
+    const fromBlock = latestBlock > lookbackBlocks
+      ? latestBlock - lookbackBlocks
+      : env.scanStartBlock
+
+    const [burnLogs, buybackLogs] = await Promise.all([
+      getLogsPaged({
+        address: CONTRACTS.loot,
+        event: TRANSFER_EVENT,
+        args: { to: ZERO_ADDRESS },
+        fromBlock,
+        toBlock: 'latest',
+      }) as Promise<DirectBurnLog[]>,
+      getRecentBuybackLogs(lookbackBlocks),
+    ])
+
+    const buybackTxHashes = new Set(
+      buybackLogs.map((log) => log.transactionHash.toLowerCase())
+    )
+
+    return burnLogs
+      .filter((log) => !buybackTxHashes.has(log.transactionHash.toLowerCase()))
+      .sort(compareLogsDesc)
+  }, {
+    staleWhileRevalidate: true,
+    maxStaleMs: 60_000,
   })
 }
 
@@ -1067,11 +1165,11 @@ async function getCheckpointLogs() {
   })
 }
 
-async function getRecentCheckpointLogs() {
-  return withCache('grid:checkpointed:recent', 30_000, async () => {
+async function getRecentCheckpointLogs(lookbackBlocks = RECENT_LEADERBOARD_LOOKBACK) {
+  return withCache(`grid:checkpointed:recent:${lookbackBlocks.toString()}`, 30_000, async () => {
     const latestBlock = await withRpcRetries(() => publicClient.getBlockNumber())
-    const recentFromBlock = latestBlock > RECENT_LEADERBOARD_LOOKBACK
-      ? latestBlock - RECENT_LEADERBOARD_LOOKBACK
+    const recentFromBlock = latestBlock > lookbackBlocks
+      ? latestBlock - lookbackBlocks
       : env.scanStartBlock
 
     return getLogsPaged({
@@ -1125,6 +1223,25 @@ async function getLockRewardNotifiedLogs() {
     event: LOCK_REWARD_NOTIFIED_EVENT,
     fromBlock: env.scanStartBlock,
     toBlock: 'latest',
+  })
+}
+
+async function getRecentLockRewardNotifiedLogs(lookbackBlocks = CHAIN_FALLBACK_HISTORY_LOOKBACK_BLOCKS) {
+  return withCache(`locker-rewards:notified:recent:${lookbackBlocks.toString()}`, 30_000, async () => {
+    const latestBlock = await withRpcRetries(() => publicClient.getBlockNumber())
+    const fromBlock = latestBlock > lookbackBlocks
+      ? latestBlock - lookbackBlocks
+      : env.scanStartBlock
+
+    return getLogsPaged({
+      address: CONTRACTS.lockerRewards,
+      event: LOCK_REWARD_NOTIFIED_EVENT,
+      fromBlock,
+      toBlock: 'latest',
+    })
+  }, {
+    staleWhileRevalidate: true,
+    maxStaleMs: 60_000,
   })
 }
 
@@ -1455,6 +1572,11 @@ async function getRoundState(roundId: bigint) {
 export async function getRound(roundIdInput: string | number | bigint) {
   const roundId = BigInt(roundIdInput)
   const loadFromChain = async () => {
+    const status = await getProtocolStatus()
+    if (!status.gameStarted || !isWithinChainFallbackWindow(roundId, status.currentRoundId)) {
+      return null as never
+    }
+
     const roundState = await getRoundState(roundId)
 
     if (roundState.totalDeployed === 0n || roundState.winnersDeployed === 0n) {
@@ -1529,6 +1651,11 @@ export async function getRound(roundIdInput: string | number | bigint) {
 export async function getRoundMiners(roundIdInput: string | number | bigint) {
   const roundId = BigInt(roundIdInput)
   const loadFromChain = async () => {
+    const status = await getProtocolStatus()
+    if (!status.gameStarted || !isWithinChainFallbackWindow(roundId, status.currentRoundId)) {
+      return null as never
+    }
+
     const roundState = await getRoundState(roundId)
 
     if (roundState.totalDeployed === 0n || roundState.winnersDeployed === 0n) {
@@ -1610,15 +1737,20 @@ export async function getRounds(page = 1, limit = 12, lootpotOnly = false) {
           }
         }
 
+        const minRoundId = getChainFallbackMinSettledRound(status.currentRoundId)
+        const latestSettledRoundId = status.currentRoundId - 1n
+
         if (!lootpotOnly) {
-          const total = Number(status.currentRoundId > 0n ? status.currentRoundId - 1n : 0n)
+          const total = latestSettledRoundId >= minRoundId
+            ? Number(latestSettledRoundId - minRoundId + 1n)
+            : 0
           const pages = Math.max(1, Math.ceil(total / limit))
-          const startRound = total - ((page - 1) * limit)
-          const endRound = Math.max(startRound - limit + 1, 1)
+          const startRound = Number(latestSettledRoundId) - ((page - 1) * limit)
+          const endRound = Math.max(startRound - limit + 1, Number(minRoundId))
           const slice: number[] = []
 
           for (let roundId = startRound; roundId >= endRound; roundId -= 1) {
-            if (roundId > 0) slice.push(roundId)
+            if (roundId >= Number(minRoundId)) slice.push(roundId)
           }
 
           const rounds = await mapWithConcurrency(slice, 4, async (roundId) => getRound(roundId))
@@ -1628,11 +1760,13 @@ export async function getRounds(page = 1, limit = 12, lootpotOnly = false) {
           }
         }
 
-        const logs = await getRoundSettledLogs()
+        const logs = await getRecentRoundSettledLogs(CHAIN_FALLBACK_HISTORY_LOOKBACK_BLOCKS)
         let roundIds = logs.map((log) => Number(log.args.roundId))
         roundIds = logs.filter((log) => toBigInt(log.args.lootpotAmount ?? 0n) > 0n).map((log) => Number(log.args.roundId))
 
-        roundIds = [...new Set(roundIds)].sort((a, b) => b - a)
+        roundIds = [...new Set(roundIds)]
+          .filter((roundId) => BigInt(roundId) >= minRoundId)
+          .sort((a, b) => b - a)
         const total = roundIds.length
         const pages = Math.max(1, Math.ceil(total / limit))
         const slice = roundIds.slice((page - 1) * limit, page * limit)
@@ -1831,8 +1965,8 @@ export async function getBuybacks(page = 1, limit = 12) {
   return withCache(`buybacks:${page}:${limit}`, HEAVY_ROUTE_CACHE_TTL_MS, async () => {
     return preferIndexed(() => getIndexedBuybacks(page, limit), async () => {
       const [buybackLogs, standaloneBurnLogs] = await Promise.all([
-        getBuybackLogs(),
-        getStandaloneBurnLogs(),
+        getRecentBuybackLogs(),
+        getRecentStandaloneBurnLogs(),
       ])
 
       const ordered = [
@@ -2146,7 +2280,23 @@ export async function getUserHistory(address: Address, limit = 100, roundIdFilte
           }
         }
 
-        const ordered = (await getDeploymentLogsForUser(address))
+        const minRoundId = getChainFallbackMinSettledRound(status.currentRoundId)
+        if (roundIdFilter && roundIdFilter < minRoundId) {
+          return {
+            history: [],
+            totals: {
+              totalETHWonFormatted: '0',
+              totalLOOTWonFormatted: '0',
+              totalETHDeployedFormatted: '0',
+              totalPNL: '0',
+              roundsPlayed: 0,
+              roundsWon: 0,
+            },
+          }
+        }
+
+        const ordered = (await getRecentDeploymentLogsForUser(address))
+          .filter((log) => toBigInt(log.args.roundId) >= minRoundId)
           .filter((log) => !roundIdFilter || toBigInt(log.args.roundId) === roundIdFilter)
           .sort((a, b) => compareLogsDesc(a, b))
           .slice(0, safeLimit)
@@ -2326,7 +2476,7 @@ export async function getLockDistributions(page = 1, limit = 12) {
         const safeLimit = Number.isFinite(limit) ? Math.max(1, Math.min(Math.floor(limit), 100)) : 12
 
         const [logs, snapshot] = await Promise.all([
-          getLockRewardNotifiedLogs(),
+          getRecentLockRewardNotifiedLogs(),
           getLockerSnapshot(),
         ])
 
@@ -2415,7 +2565,7 @@ export async function getLeaderboardMiners(limit = 12) {
         return { period: 'recent', miners: [], deployers: [] }
       }
 
-      const snapshot = await getRecentDeploymentTotals()
+      const snapshot = await getRecentDeploymentTotals(CHAIN_FALLBACK_HISTORY_LOOKBACK_BLOCKS)
       const deployers = [...snapshot.totalsByUser.entries()]
           .sort((a, b) => (b[1] > a[1] ? 1 : -1))
           .slice(0, limit)
@@ -2473,7 +2623,7 @@ export async function getLeaderboardEarners(limit = 12) {
         }
       }
 
-      const checkpointLogs = await getRecentCheckpointLogs()
+      const checkpointLogs = await getRecentCheckpointLogs(CHAIN_FALLBACK_HISTORY_LOOKBACK_BLOCKS)
       const users = [...new Set(
         [...checkpointLogs]
           .sort(compareLogsDesc)
