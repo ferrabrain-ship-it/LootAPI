@@ -1771,35 +1771,40 @@ export async function getCopilotContext(lookback = 1000) {
 
 export async function getTreasuryStats() {
   return withCache('treasury-stats', HEAVY_ROUTE_CACHE_TTL_MS, async () => {
-    const status = await getProtocolStatus()
-    const [stats, totalVaultedLifetime, standaloneBurnLogs] = await Promise.all([
-      withRpcRetries(() => publicClient.readContract({
-        address: CONTRACTS.treasury,
-        abi: treasuryAbi,
-        functionName: 'getStats',
-      }) as Promise<[bigint, bigint, bigint, bigint]>),
-      status.currentRoundId === 0n ? Promise.resolve(0n) : getLatestVaultTotal(),
-      getStandaloneBurnLogs(),
-    ])
+    return preferIndexed(
+      () => getIndexedTreasuryStats(),
+      async () => {
+        const status = await getProtocolStatus()
+        const [stats, totalVaultedLifetime, standaloneBurnLogs] = await Promise.all([
+          withRpcRetries(() => publicClient.readContract({
+            address: CONTRACTS.treasury,
+            abi: treasuryAbi,
+            functionName: 'getStats',
+          }) as Promise<[bigint, bigint, bigint, bigint]>),
+          status.currentRoundId === 0n ? Promise.resolve(0n) : getLatestVaultTotal(),
+          getStandaloneBurnLogs(),
+        ])
 
-    const directBurnedLifetime = standaloneBurnLogs.reduce((sum, log) => sum + toBigInt(log.args.value), 0n)
-    const totalBurnedLifetime = stats[1] + directBurnedLifetime
+        const directBurnedLifetime = standaloneBurnLogs.reduce((sum, log) => sum + toBigInt(log.args.value), 0n)
+        const totalBurnedLifetime = stats[1] + directBurnedLifetime
 
-    return {
-      totalVaulted: totalVaultedLifetime.toString(),
-      totalVaultedFormatted: etherString(totalVaultedLifetime),
-      currentVaulted: stats[0].toString(),
-      currentVaultedFormatted: etherString(stats[0]),
-      totalBurned: totalBurnedLifetime.toString(),
-      totalBurnedFormatted: etherString(totalBurnedLifetime),
-      buybackBurned: stats[1].toString(),
-      buybackBurnedFormatted: etherString(stats[1]),
-      directBurned: directBurnedLifetime.toString(),
-      directBurnedFormatted: etherString(directBurnedLifetime),
-      totalDistributedToStakers: stats[2].toString(),
-      totalDistributedToStakersFormatted: etherString(stats[2]),
-      totalBuybacks: Number(stats[3]),
-    }
+        return {
+          totalVaulted: totalVaultedLifetime.toString(),
+          totalVaultedFormatted: etherString(totalVaultedLifetime),
+          currentVaulted: stats[0].toString(),
+          currentVaultedFormatted: etherString(stats[0]),
+          totalBurned: totalBurnedLifetime.toString(),
+          totalBurnedFormatted: etherString(totalBurnedLifetime),
+          buybackBurned: stats[1].toString(),
+          buybackBurnedFormatted: etherString(stats[1]),
+          directBurned: directBurnedLifetime.toString(),
+          directBurnedFormatted: etherString(directBurnedLifetime),
+          totalDistributedToStakers: stats[2].toString(),
+          totalDistributedToStakersFormatted: etherString(stats[2]),
+          totalBuybacks: Number(stats[3]),
+        }
+      }
+    )
   }, {
     staleWhileRevalidate: true,
     maxStaleMs: HEAVY_CACHE_MAX_STALE_MS,
@@ -1808,60 +1813,62 @@ export async function getTreasuryStats() {
 
 export async function getBuybacks(page = 1, limit = 12) {
   return withCache(`buybacks:${page}:${limit}`, HEAVY_ROUTE_CACHE_TTL_MS, async () => {
-    const [buybackLogs, standaloneBurnLogs] = await Promise.all([
-      getBuybackLogs(),
-      getStandaloneBurnLogs(),
-    ])
+    return preferIndexed(() => getIndexedBuybacks(page, limit), async () => {
+      const [buybackLogs, standaloneBurnLogs] = await Promise.all([
+        getBuybackLogs(),
+        getStandaloneBurnLogs(),
+      ])
 
-    const ordered = [
-      ...buybackLogs.map((log) => ({ type: 'buyback' as const, log })),
-      ...standaloneBurnLogs.map((log) => ({ type: 'burn' as const, log })),
-    ].sort((a, b) => compareLogsDesc(a.log, b.log))
-    const total = ordered.length
-    const pages = Math.max(1, Math.ceil(total / limit))
-    const slice = ordered.slice((page - 1) * limit, page * limit)
+      const ordered = [
+        ...buybackLogs.map((log) => ({ type: 'buyback' as const, log })),
+        ...standaloneBurnLogs.map((log) => ({ type: 'burn' as const, log })),
+      ].sort((a, b) => compareLogsDesc(a.log, b.log))
+      const total = ordered.length
+      const pages = Math.max(1, Math.ceil(total / limit))
+      const slice = ordered.slice((page - 1) * limit, page * limit)
 
-    const buybacks = await Promise.all(slice.map(async ({ type, log }) => {
-      const timestampMs = await getBlockTimestampMs(getLogBlockNumber(log))
+      const buybacks = await Promise.all(slice.map(async ({ type, log }) => {
+        const timestampMs = await getBlockTimestampMs(getLogBlockNumber(log))
 
-      if (type === 'buyback') {
+        if (type === 'buyback') {
+          return {
+            type,
+            ethSpent: toBigInt(log.args.ethSpent).toString(),
+            ethSpentFormatted: etherString(toBigInt(log.args.ethSpent)),
+            lootReceived: toBigInt(log.args.lootReceived).toString(),
+            lootReceivedFormatted: etherString(toBigInt(log.args.lootReceived)),
+            lootBurned: toBigInt(log.args.lootBurned).toString(),
+            lootBurnedFormatted: etherString(toBigInt(log.args.lootBurned)),
+            lootToStakers: toBigInt(log.args.lootToStakers).toString(),
+            lootToStakersFormatted: etherString(toBigInt(log.args.lootToStakers)),
+            txHash: log.transactionHash,
+            blockNumber: Number(log.blockNumber),
+            timestamp: new Date(timestampMs).toISOString(),
+          }
+        }
+
         return {
           type,
-          ethSpent: toBigInt(log.args.ethSpent).toString(),
-          ethSpentFormatted: etherString(toBigInt(log.args.ethSpent)),
-          lootReceived: toBigInt(log.args.lootReceived).toString(),
-          lootReceivedFormatted: etherString(toBigInt(log.args.lootReceived)),
-          lootBurned: toBigInt(log.args.lootBurned).toString(),
-          lootBurnedFormatted: etherString(toBigInt(log.args.lootBurned)),
-          lootToStakers: toBigInt(log.args.lootToStakers).toString(),
-          lootToStakersFormatted: etherString(toBigInt(log.args.lootToStakers)),
+          ethSpent: null,
+          ethSpentFormatted: null,
+          lootReceived: null,
+          lootReceivedFormatted: null,
+          lootBurned: toBigInt(log.args.value).toString(),
+          lootBurnedFormatted: etherString(toBigInt(log.args.value)),
+          lootToStakers: null,
+          lootToStakersFormatted: null,
           txHash: log.transactionHash,
           blockNumber: Number(log.blockNumber),
           timestamp: new Date(timestampMs).toISOString(),
+          burnedBy: normalizeAddress(log.args.from),
         }
-      }
+      }))
 
       return {
-        type,
-        ethSpent: null,
-        ethSpentFormatted: null,
-        lootReceived: null,
-        lootReceivedFormatted: null,
-        lootBurned: toBigInt(log.args.value).toString(),
-        lootBurnedFormatted: etherString(toBigInt(log.args.value)),
-        lootToStakers: null,
-        lootToStakersFormatted: null,
-        txHash: log.transactionHash,
-        blockNumber: Number(log.blockNumber),
-        timestamp: new Date(timestampMs).toISOString(),
-        burnedBy: normalizeAddress(log.args.from),
+        buybacks,
+        pagination: { page, limit, total, pages },
       }
-    }))
-
-    return {
-      buybacks,
-      pagination: { page, limit, total, pages },
-    }
+    })
   }, {
     staleWhileRevalidate: true,
     maxStaleMs: HEAVY_CACHE_MAX_STALE_MS,
