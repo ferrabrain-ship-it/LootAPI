@@ -112,7 +112,7 @@ const LOG_FETCH_CONCURRENCY = 4
 const RECENT_SETTLED_LOOKBACK = 1_000n
 const RECENT_SETTLED_LIST_LOOKBACK = 5_000n
 const RECENT_DEPLOY_LOOKBACK = 5_000n
-const RECENT_LEADERBOARD_LOOKBACK = 50_000n
+const RECENT_LEADERBOARD_LOOKBACK = 10_000n
 const RPC_RETRY_ATTEMPTS = 3
 const USER_HISTORY_MAX_LIMIT = 200
 const USER_HISTORY_CONCURRENCY = 8
@@ -300,6 +300,7 @@ function isRetryableRpcErrorMessage(message: string) {
   const m = message.toLowerCase()
   return (
     m.includes('fetch failed') ||
+    m.includes('http request failed') ||
     m.includes('timeout') ||
     m.includes('timed out') ||
     m.includes('socket hang up') ||
@@ -311,7 +312,10 @@ function isRetryableRpcErrorMessage(message: string) {
     m.includes('quota') ||
     m.includes('credits') ||
     m.includes('resource not found') ||
-    m.includes('gateway timeout')
+    m.includes('gateway timeout') ||
+    m.includes('expected double-quoted property name') ||
+    m.includes('unexpected token') ||
+    m.includes('syntaxerror')
   )
 }
 
@@ -2337,7 +2341,11 @@ export async function getLeaderboardEarners(limit = 12) {
     }
 
     const checkpointLogs = await getRecentCheckpointLogs()
-    const users = [...new Set(checkpointLogs.map((log) => normalizeAddress(log.args.user)))]
+    const users = [...new Set(
+      [...checkpointLogs]
+        .sort(compareLogsDesc)
+        .map((log) => normalizeAddress(log.args.user))
+    )].slice(0, Math.max(limit * 4, 48))
     const rewards = (await mapWithConcurrency(users, LEADERBOARD_EARNERS_CONCURRENCY, async (address) => {
       try {
         return {
