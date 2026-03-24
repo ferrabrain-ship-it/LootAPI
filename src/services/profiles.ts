@@ -120,7 +120,10 @@ export async function getProfile(address: Address): Promise<ProfileShape> {
         .maybeSingle<SocialConnectionRow>(),
     ]),
     PROFILE_QUERY_TIMEOUT_MS,
-    [{ data: null }, { data: null }] as [{ data: ProfileRow | null }, { data: SocialConnectionRow | null }]
+    [
+      { data: null, error: null, count: null, status: 200, statusText: 'timeout' },
+      { data: null, error: null, count: null, status: 200, statusText: 'timeout' },
+    ]
   )
 
   const profileShape = {
@@ -169,7 +172,10 @@ export async function getProfilesBatch(addresses: Address[]) {
         .returns<SocialConnectionRow[]>(),
     ]),
     PROFILE_QUERY_TIMEOUT_MS,
-    [{ data: [] }, { data: [] }] as [{ data: ProfileRow[] }, { data: SocialConnectionRow[] }]
+    [
+      { data: [], error: null, count: null, status: 200, statusText: 'timeout' },
+      { data: [], error: null, count: null, status: 200, statusText: 'timeout' },
+    ]
   )
 
   const profilesByAddress = new Map((profilesData ?? []).map((row) => [
