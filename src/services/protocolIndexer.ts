@@ -20,6 +20,7 @@ const ROUND_SETTLED_EVENT = parseAbiItem(
   'event RoundSettled(uint64 indexed roundId, uint8 winningBlock, address topMiner, uint256 totalWinnings, uint256 topMinerReward, uint256 lootpotAmount, bool isSplit, uint256 topMinerSeed, uint256 winnersDeployed)'
 )
 const CHECKPOINTED_EVENT = parseAbiItem('event Checkpointed(uint64 indexed roundId, address indexed user, uint256 ethReward, uint256 lootReward)')
+const CLAIMED_LOOT_EVENT = parseAbiItem('event ClaimedLOOT(address indexed user, uint256 minedLoot, uint256 forgedLoot, uint256 fee, uint256 net)')
 const VAULT_EVENT = parseAbiItem('event VaultReceived(uint256 amount, uint256 totalVaulted)')
 const BUYBACK_EVENT = parseAbiItem(
   'event BuybackExecuted(uint256 ethSpent, uint256 lootReceived, uint256 lootBurned, uint256 lootToStakers)'
@@ -487,6 +488,55 @@ async function syncCheckpoints(client: PoolClient) {
         normalizeAddress(log.args.user, 'checkpoint user'),
         toBigInt(log.args.ethReward).toString(),
         toBigInt(log.args.lootReward).toString(),
+        log.blockNumber.toString(),
+        timestampMs,
+      ]
+    )
+  })
+
+  await updateSyncState(client, streamName, latestBlock)
+  return { streamName, inserted: logs.length, latestBlock }
+}
+
+async function syncClaimedLoot(client: PoolClient) {
+  const streamName = 'claimed_loot'
+  const lastSyncedBlock = await getLastSyncedBlock(client, streamName)
+  const latestBlock = await withRpcRetries(() => publicClient.getBlockNumber())
+  const fromBlock = lastSyncedBlock + 1n
+  if (fromBlock > latestBlock) return { streamName, inserted: 0, latestBlock }
+
+  const logs = await getLogsPaged({
+    address: CONTRACTS.gridMining,
+    event: CLAIMED_LOOT_EVENT,
+    fromBlock,
+    toBlock: latestBlock,
+  })
+
+  await upsertRows(logs, ROW_UPSERT_CONCURRENCY, async (log) => {
+    const timestampMs = await getBlockTimestampMs(log.blockNumber)
+    await runWriteQuery(
+      `
+        insert into protocol_claimed_loot (
+          tx_hash, log_index, user_address, mined_loot, forged_loot, fee, net, block_number, block_timestamp
+        )
+        values ($1,$2,$3,$4,$5,$6,$7,$8,to_timestamp($9 / 1000.0))
+        on conflict (tx_hash, log_index) do update
+        set user_address = excluded.user_address,
+            mined_loot = excluded.mined_loot,
+            forged_loot = excluded.forged_loot,
+            fee = excluded.fee,
+            net = excluded.net,
+            block_number = excluded.block_number,
+            block_timestamp = excluded.block_timestamp
+      `,
+      [
+        log.transactionHash,
+        log.logIndex,
+        normalizeAddress(log.args.user, 'claimed loot user'),
+        toBigInt(log.args.minedLoot).toString(),
+        toBigInt(log.args.forgedLoot).toString(),
+        toBigInt(log.args.fee).toString(),
+        toBigInt(log.args.net).toString(),
         log.blockNumber.toString(),
         timestampMs,
       ]
@@ -983,6 +1033,7 @@ export async function runProtocolIndexSyncOnce(options?: {
     await runStream('deployments_direct', () => syncDeployments(client, 'Deployed'))
     await runStream('deployments_for', () => syncDeployments(client, 'DeployedFor'))
     await runStream('checkpoints', () => syncCheckpoints(client))
+    await runStream('claimed_loot', () => syncClaimedLoot(client))
     await runStream('treasury_vault', () => syncVaultEvents(client))
     await runStream('treasury_buybacks', () => syncBuybacks(client))
     await runStream('direct_burns', () => syncDirectBurns(client))
