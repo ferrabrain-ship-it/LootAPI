@@ -129,6 +129,7 @@ const RECENT_SETTLED_LOOKBACK = 1_000n
 const RECENT_SETTLED_LIST_LOOKBACK = 5_000n
 const RECENT_DEPLOY_LOOKBACK = 5_000n
 const RECENT_LEADERBOARD_LOOKBACK = 10_000n
+const LOOTPOT_FALLBACK_LOOKBACK_BLOCKS = 400_000n
 const CHAIN_FALLBACK_HISTORY_WINDOW_ROUNDS = 60n
 const CHAIN_FALLBACK_HISTORY_LOOKBACK_BLOCKS = 2_000n
 const RPC_RETRY_ATTEMPTS = 3
@@ -1730,7 +1731,13 @@ export async function getRoundMiners(roundIdInput: string | number | bigint) {
 export async function getRounds(page = 1, limit = 12, lootpotOnly = false) {
   return withCache(`rounds:${page}:${limit}:${lootpotOnly ? 'lootpot' : 'all'}`, HEAVY_ROUTE_CACHE_TTL_MS, async () => {
     return preferIndexed(
-      () => getIndexedRounds(page, limit, lootpotOnly),
+      async () => {
+        const indexed = await getIndexedRounds(page, limit, lootpotOnly)
+        if (lootpotOnly && indexed && indexed.pagination.total === 0) {
+          return null
+        }
+        return indexed
+      },
       async () => {
         const status = await getProtocolStatus()
         if (!status.gameStarted || status.currentRoundId === 0n) {
@@ -1763,7 +1770,7 @@ export async function getRounds(page = 1, limit = 12, lootpotOnly = false) {
           }
         }
 
-        const logs = await getRecentRoundSettledLogs(CHAIN_FALLBACK_HISTORY_LOOKBACK_BLOCKS)
+        const logs = await getRecentRoundSettledLogs(LOOTPOT_FALLBACK_LOOKBACK_BLOCKS)
         let roundIds = logs.map((log) => Number(log.args.roundId))
         roundIds = logs.filter((log) => toBigInt(log.args.lootpotAmount ?? 0n) > 0n).map((log) => Number(log.args.roundId))
 
