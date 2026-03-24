@@ -2242,51 +2242,74 @@ export async function getUserHistory(address: Address, limit = 100, roundIdFilte
 
 export async function getLockStats() {
   return withCache('lock-stats', HEAVY_ROUTE_CACHE_TTL_MS, async () => {
-    const [totalLockedResult, totalWeightResult, totalNotifiedResult, totalClaimedResult, snapshotResult] = await Promise.allSettled([
-      withRpcRetries(() => publicClient.readContract({
-        address: CONTRACTS.lootLocker,
-        abi: LOOT_LOCKER_READ_ABI,
-        functionName: 'totalLocked',
-      }) as Promise<bigint>),
-      withRpcRetries(() => publicClient.readContract({
-        address: CONTRACTS.lootLocker,
-        abi: LOOT_LOCKER_READ_ABI,
-        functionName: 'totalWeight',
-      }) as Promise<bigint>),
-      withRpcRetries(() => publicClient.readContract({
-        address: CONTRACTS.lockerRewards,
-        abi: LOCKER_REWARDS_READ_ABI,
-        functionName: 'totalNotified',
-      }) as Promise<bigint>),
-      withRpcRetries(() => publicClient.readContract({
-        address: CONTRACTS.lockerRewards,
-        abi: LOCKER_REWARDS_READ_ABI,
-        functionName: 'totalClaimed',
-      }) as Promise<bigint>),
-      getLockerSnapshot(),
-    ])
+    return preferIndexed(
+      async () => {
+        const indexed = await getIndexedLockSnapshot()
+        if (!indexed) return null
 
-    const totalLocked = totalLockedResult.status === 'fulfilled' ? totalLockedResult.value : 0n
-    const totalWeight = totalWeightResult.status === 'fulfilled' ? totalWeightResult.value : 0n
-    const totalNotified = totalNotifiedResult.status === 'fulfilled' ? totalNotifiedResult.value : 0n
-    const totalClaimed = totalClaimedResult.status === 'fulfilled' ? totalClaimedResult.value : 0n
-    const snapshot = snapshotResult.status === 'fulfilled'
-      ? snapshotResult.value
-      : { userLocked: new Map<string, bigint>(), userWeight: new Map<string, bigint>() }
+        const totalClaimedResult = await Promise.allSettled([
+          withRpcRetries(() => publicClient.readContract({
+            address: CONTRACTS.lockerRewards,
+            abi: LOCKER_REWARDS_READ_ABI,
+            functionName: 'totalClaimed',
+          }) as Promise<bigint>),
+        ])
+        const totalClaimed = totalClaimedResult[0]?.status === 'fulfilled' ? totalClaimedResult[0].value : 0n
 
-    const lockers = [...snapshot.userLocked.entries()].filter(([, locked]) => locked > 0n).length
+        return {
+          ...indexed,
+          totalClaimed: totalClaimed.toString(),
+          totalClaimedFormatted: etherString(totalClaimed),
+        }
+      },
+      async () => {
+        const [totalLockedResult, totalWeightResult, totalNotifiedResult, totalClaimedResult, snapshotResult] = await Promise.allSettled([
+          withRpcRetries(() => publicClient.readContract({
+            address: CONTRACTS.lootLocker,
+            abi: LOOT_LOCKER_READ_ABI,
+            functionName: 'totalLocked',
+          }) as Promise<bigint>),
+          withRpcRetries(() => publicClient.readContract({
+            address: CONTRACTS.lootLocker,
+            abi: LOOT_LOCKER_READ_ABI,
+            functionName: 'totalWeight',
+          }) as Promise<bigint>),
+          withRpcRetries(() => publicClient.readContract({
+            address: CONTRACTS.lockerRewards,
+            abi: LOCKER_REWARDS_READ_ABI,
+            functionName: 'totalNotified',
+          }) as Promise<bigint>),
+          withRpcRetries(() => publicClient.readContract({
+            address: CONTRACTS.lockerRewards,
+            abi: LOCKER_REWARDS_READ_ABI,
+            functionName: 'totalClaimed',
+          }) as Promise<bigint>),
+          getLockerSnapshot(),
+        ])
 
-    return {
-      protocolLocked: totalLocked.toString(),
-      protocolLockedFormatted: etherString(totalLocked),
-      protocolWeight: totalWeight.toString(),
-      protocolWeightFormatted: etherString(totalWeight),
-      totalNotified: totalNotified.toString(),
-      totalNotifiedFormatted: etherString(totalNotified),
-      totalClaimed: totalClaimed.toString(),
-      totalClaimedFormatted: etherString(totalClaimed),
-      lockers,
-    }
+        const totalLocked = totalLockedResult.status === 'fulfilled' ? totalLockedResult.value : 0n
+        const totalWeight = totalWeightResult.status === 'fulfilled' ? totalWeightResult.value : 0n
+        const totalNotified = totalNotifiedResult.status === 'fulfilled' ? totalNotifiedResult.value : 0n
+        const totalClaimed = totalClaimedResult.status === 'fulfilled' ? totalClaimedResult.value : 0n
+        const snapshot = snapshotResult.status === 'fulfilled'
+          ? snapshotResult.value
+          : { userLocked: new Map<string, bigint>(), userWeight: new Map<string, bigint>() }
+
+        const lockers = [...snapshot.userLocked.entries()].filter(([, locked]) => locked > 0n).length
+
+        return {
+          protocolLocked: totalLocked.toString(),
+          protocolLockedFormatted: etherString(totalLocked),
+          protocolWeight: totalWeight.toString(),
+          protocolWeightFormatted: etherString(totalWeight),
+          totalNotified: totalNotified.toString(),
+          totalNotifiedFormatted: etherString(totalNotified),
+          totalClaimed: totalClaimed.toString(),
+          totalClaimedFormatted: etherString(totalClaimed),
+          lockers,
+        }
+      }
+    )
   }, {
     staleWhileRevalidate: true,
     maxStaleMs: HEAVY_CACHE_MAX_STALE_MS,
