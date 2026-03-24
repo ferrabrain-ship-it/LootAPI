@@ -295,7 +295,7 @@ function startCacheWarmer() {
     }
   }
 
-  schedule(Math.min(15_000, env.cacheWarmIntervalMs))
+  schedule(env.cacheWarmIntervalMs)
 }
 
 function startLootpotWorker() {
