@@ -2126,114 +2126,117 @@ export async function getAutoMine(address: Address) {
 export async function getUserHistory(address: Address, limit = 100, roundIdFilter?: bigint) {
   const roundKey = roundIdFilter ? roundIdFilter.toString() : 'all'
   return withCache(`user-history:${address}:${limit}:${roundKey}`, 30_000, async () => {
-    const safeLimit = Math.max(1, Math.min(limit, USER_HISTORY_MAX_LIMIT))
-    const status = await getProtocolStatus()
-    if (!status.gameStarted || status.currentRoundId === 0n) {
-      return {
-        history: [],
-        totals: {
-          totalETHWonFormatted: '0',
-          totalLOOTWonFormatted: '0',
-          totalETHDeployedFormatted: '0',
-          totalPNL: '0',
-          roundsPlayed: 0,
+    return preferIndexed(
+      () => getIndexedUserHistory(address, limit, roundIdFilter),
+      async () => {
+        const safeLimit = Math.max(1, Math.min(limit, USER_HISTORY_MAX_LIMIT))
+        const status = await getProtocolStatus()
+        if (!status.gameStarted || status.currentRoundId === 0n) {
+          return {
+            history: [],
+            totals: {
+              totalETHWonFormatted: '0',
+              totalLOOTWonFormatted: '0',
+              totalETHDeployedFormatted: '0',
+              totalPNL: '0',
+              roundsPlayed: 0,
+              roundsWon: 0,
+            },
+          }
+        }
+
+        const ordered = (await getDeploymentLogsForUser(address))
+          .filter((log) => !roundIdFilter || toBigInt(log.args.roundId) === roundIdFilter)
+          .sort((a, b) => compareLogsDesc(a, b))
+          .slice(0, safeLimit)
+
+        const roundCache = new Map<bigint, Promise<Awaited<ReturnType<typeof getRound>>>>()
+        const minerCache = new Map<bigint, Promise<Awaited<ReturnType<typeof getRoundMiners>>>>()
+        const loadRound = (roundId: bigint) => {
+          const cached = roundCache.get(roundId)
+          if (cached) return cached
+          const promise = getRound(roundId)
+          roundCache.set(roundId, promise)
+          return promise
+        }
+        const loadRoundMiners = (roundId: bigint) => {
+          const cached = minerCache.get(roundId)
+          if (cached) return cached
+          const promise = getRoundMiners(roundId)
+          minerCache.set(roundId, promise)
+          return promise
+        }
+
+        const history = (await mapWithConcurrency(ordered, USER_HISTORY_CONCURRENCY, async (log) => {
+          try {
+            const roundId = toBigInt(log.args.roundId)
+            const [round, miners, timestamp] = await Promise.all([
+              loadRound(roundId),
+              loadRoundMiners(roundId),
+              getBlockTimestampMs(getLogBlockNumber(log)),
+            ])
+            const blockMask = toBigInt(log.args.blockMask)
+            const totalAmount = toBigInt(log.args.totalAmount)
+            const wonWinningBlock = decodeBlockMask(blockMask).includes(round.winningBlock)
+            const userMiner = miners.miners.find((miner) => safeAddressEq(miner.address, address))
+            const ethWon = userMiner ? BigInt(userMiner.ethReward) : 0n
+            const lootWon = userMiner ? BigInt(userMiner.lootReward) : 0n
+            const pnl = Number(formatEther(ethWon)) - Number(formatEther(totalAmount))
+
+            return {
+              roundId: Number(roundId),
+              totalAmount: totalAmount.toString(),
+              blockMask: blockMask.toString(),
+              txHash: log.transactionHash,
+              isAutoMine: log.eventName === 'DeployedFor',
+              timestamp: new Date(timestamp).toISOString(),
+              roundResult: {
+                settled: true,
+                wonWinningBlock,
+                lootpotHit: BigInt(round.lootpotAmount) > 0n,
+                winningBlock: round.winningBlock,
+                ethWon: ethWon.toString(),
+                ethWonFormatted: etherString(ethWon),
+                lootWon: lootWon.toString(),
+                lootWonFormatted: etherString(lootWon),
+                pnl: pnl.toString(),
+              },
+            }
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error)
+            console.warn(`[user-history] skipped ${log.transactionHash} for ${address}: ${message}`)
+            return null
+          }
+        })).filter((entry) => entry !== null)
+
+        const totals = history.reduce((acc, entry) => {
+          acc.totalETHWon += BigInt(entry.roundResult.ethWon)
+          acc.totalLOOTWon += BigInt(entry.roundResult.lootWon)
+          acc.totalETHDeployed += BigInt(entry.totalAmount)
+          acc.totalPNL += Number(entry.roundResult.pnl)
+          if (entry.roundResult.wonWinningBlock) acc.roundsWon += 1
+          return acc
+        }, {
+          totalETHWon: 0n,
+          totalLOOTWon: 0n,
+          totalETHDeployed: 0n,
+          totalPNL: 0,
           roundsWon: 0,
-        },
-      }
-    }
-
-    const ordered = (await getDeploymentLogsForUser(address))
-      .filter((log) => !roundIdFilter || toBigInt(log.args.roundId) === roundIdFilter)
-      .sort((a, b) =>
-      compareLogsDesc(a, b)
-    )
-      .slice(0, safeLimit)
-
-    const roundCache = new Map<bigint, Promise<Awaited<ReturnType<typeof getRound>>>>()
-    const minerCache = new Map<bigint, Promise<Awaited<ReturnType<typeof getRoundMiners>>>>()
-    const loadRound = (roundId: bigint) => {
-      const cached = roundCache.get(roundId)
-      if (cached) return cached
-      const promise = getRound(roundId)
-      roundCache.set(roundId, promise)
-      return promise
-    }
-    const loadRoundMiners = (roundId: bigint) => {
-      const cached = minerCache.get(roundId)
-      if (cached) return cached
-      const promise = getRoundMiners(roundId)
-      minerCache.set(roundId, promise)
-      return promise
-    }
-
-    const history = (await mapWithConcurrency(ordered, USER_HISTORY_CONCURRENCY, async (log) => {
-      try {
-        const roundId = toBigInt(log.args.roundId)
-        const [round, miners, timestamp] = await Promise.all([
-          loadRound(roundId),
-          loadRoundMiners(roundId),
-          getBlockTimestampMs(getLogBlockNumber(log)),
-        ])
-        const blockMask = toBigInt(log.args.blockMask)
-        const totalAmount = toBigInt(log.args.totalAmount)
-        const wonWinningBlock = decodeBlockMask(blockMask).includes(round.winningBlock)
-        const userMiner = miners.miners.find((miner) => safeAddressEq(miner.address, address))
-        const ethWon = userMiner ? BigInt(userMiner.ethReward) : 0n
-        const lootWon = userMiner ? BigInt(userMiner.lootReward) : 0n
-        const pnl = Number(formatEther(ethWon)) - Number(formatEther(totalAmount))
+        })
 
         return {
-          roundId: Number(roundId),
-          totalAmount: totalAmount.toString(),
-          blockMask: blockMask.toString(),
-          txHash: log.transactionHash,
-          isAutoMine: log.eventName === 'DeployedFor',
-          timestamp: new Date(timestamp).toISOString(),
-          roundResult: {
-            settled: true,
-            wonWinningBlock,
-            lootpotHit: BigInt(round.lootpotAmount) > 0n,
-            winningBlock: round.winningBlock,
-            ethWon: ethWon.toString(),
-            ethWonFormatted: etherString(ethWon),
-            lootWon: lootWon.toString(),
-            lootWonFormatted: etherString(lootWon),
-            pnl: pnl.toString(),
+          history,
+          totals: {
+            totalETHWonFormatted: etherString(totals.totalETHWon),
+            totalLOOTWonFormatted: etherString(totals.totalLOOTWon),
+            totalETHDeployedFormatted: etherString(totals.totalETHDeployed),
+            totalPNL: totals.totalPNL.toString(),
+            roundsPlayed: history.length,
+            roundsWon: totals.roundsWon,
           },
         }
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
-        console.warn(`[user-history] skipped ${log.transactionHash} for ${address}: ${message}`)
-        return null
       }
-    })).filter((entry) => entry !== null)
-
-    const totals = history.reduce((acc, entry) => {
-      acc.totalETHWon += BigInt(entry.roundResult.ethWon)
-      acc.totalLOOTWon += BigInt(entry.roundResult.lootWon)
-      acc.totalETHDeployed += BigInt(entry.totalAmount)
-      acc.totalPNL += Number(entry.roundResult.pnl)
-      if (entry.roundResult.wonWinningBlock) acc.roundsWon += 1
-      return acc
-    }, {
-      totalETHWon: 0n,
-      totalLOOTWon: 0n,
-      totalETHDeployed: 0n,
-      totalPNL: 0,
-      roundsWon: 0,
-    })
-
-    return {
-      history,
-      totals: {
-        totalETHWonFormatted: etherString(totals.totalETHWon),
-        totalLOOTWonFormatted: etherString(totals.totalLOOTWon),
-        totalETHDeployedFormatted: etherString(totals.totalETHDeployed),
-        totalPNL: totals.totalPNL.toString(),
-        roundsPlayed: history.length,
-        roundsWon: totals.roundsWon,
-      },
-    }
+    )
   })
 }
 
