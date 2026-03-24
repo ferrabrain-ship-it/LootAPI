@@ -267,6 +267,11 @@ function stopAgentStatsWorker() {
 }
 
 function startCacheWarmer() {
+  if (!env.enableCacheWarmer) {
+    app.log.info('[cache-warmer] disabled')
+    return
+  }
+
   cacheWarmerStopping = false
   const schedule = (delayMs: number) => {
     if (cacheWarmerStopping) return

@@ -26,8 +26,22 @@ interface SocialConnectionRow {
 }
 
 const PROFILE_CACHE_TTL_MS = 30_000
+const PROFILE_QUERY_TIMEOUT_MS = 3_000
 const profileCache = new Map<string, { expiresAt: number; value: ProfileShape }>()
 const batchCache = new Map<string, { expiresAt: number; value: { profiles: Array<{ address: string; username: string | null; pfpUrl: string | null }> } }>()
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, fallback: T): Promise<T> {
+  let timer: NodeJS.Timeout | null = null
+
+  return Promise.race([
+    promise.finally(() => {
+      if (timer) clearTimeout(timer)
+    }),
+    new Promise<T>((resolve) => {
+      timer = setTimeout(() => resolve(fallback), timeoutMs)
+    }),
+  ])
+}
 
 function getCachedProfile(key: string) {
   const cached = profileCache.get(key)

@@ -665,7 +665,10 @@ async function isRecentRound(roundId: bigint) {
 export async function getLootPrice() {
   return withCache('loot-price', 20_000, async () => {
   try {
-    const res = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${CONTRACTS.loot}`, { cache: 'no-store' })
+    const res = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${CONTRACTS.loot}`, {
+      cache: 'no-store',
+      signal: AbortSignal.timeout(3_000),
+    })
     if (!res.ok) {
       return emptyPricePayload()
     }
@@ -2693,33 +2696,38 @@ export async function warmProtocolCaches() {
 }
 
 export async function getLatestRoundTransition() {
-  const current = await getCurrentRound()
-  const roundId = BigInt(current.roundId)
-  const previousRoundId = roundId > 1n ? roundId - 1n : 0n
-  const settledLog = previousRoundId > 0n
-    ? await getRoundSettledLogForRound(previousRoundId, true).catch(() => null)
-    : null
-  const settledAtMs = settledLog?.blockNumber ? await getBlockTimestampMs(settledLog.blockNumber).catch(() => null) : null
+  return withCache('latest-round-transition', 2_000, async () => {
+    const current = await getCurrentRound()
+    const roundId = BigInt(current.roundId)
+    const previousRoundId = roundId > 1n ? roundId - 1n : 0n
+    const settledLog = previousRoundId > 0n
+      ? await getRoundSettledLogForRound(previousRoundId, false).catch(() => null)
+      : null
+    const settledAtMs = settledLog?.blockNumber ? await getBlockTimestampMs(settledLog.blockNumber).catch(() => null) : null
 
-  return {
-    settled: settledLog ? {
-      roundId: previousRoundId.toString(),
-      winningBlock: Number(settledLog.args.winningBlock).toString(),
-      topMiner: normalizeAddress(settledLog.args.topMiner),
-      totalWinnings: toBigInt(settledLog.args.totalWinnings).toString(),
-      topMinerReward: toBigInt(settledLog.args.topMinerReward).toString(),
-      lootpotAmount: toBigInt(settledLog.args.lootpotAmount).toString(),
-      isSplit: Boolean(settledLog.args.isSplit),
-      settledAt: settledAtMs ? new Date(settledAtMs).toISOString() : undefined,
-    } : null,
-    newRound: {
-      roundId: current.roundId,
-      startTime: current.startTime,
-      endTime: current.endTime,
-      lootpotPool: current.lootpotPool,
-      lootpotPoolFormatted: current.lootpotPoolFormatted,
-    },
-  }
+    return {
+      settled: settledLog ? {
+        roundId: previousRoundId.toString(),
+        winningBlock: Number(settledLog.args.winningBlock).toString(),
+        topMiner: normalizeAddress(settledLog.args.topMiner),
+        totalWinnings: toBigInt(settledLog.args.totalWinnings).toString(),
+        topMinerReward: toBigInt(settledLog.args.topMinerReward).toString(),
+        lootpotAmount: toBigInt(settledLog.args.lootpotAmount).toString(),
+        isSplit: Boolean(settledLog.args.isSplit),
+        settledAt: settledAtMs ? new Date(settledAtMs).toISOString() : undefined,
+      } : null,
+      newRound: {
+        roundId: current.roundId,
+        startTime: current.startTime,
+        endTime: current.endTime,
+        lootpotPool: current.lootpotPool,
+        lootpotPoolFormatted: current.lootpotPoolFormatted,
+      },
+    }
+  }, {
+    staleWhileRevalidate: true,
+    maxStaleMs: 15_000,
+  })
 }
 
 export function asAddress(value: string): Address {
