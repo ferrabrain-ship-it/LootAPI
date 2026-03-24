@@ -106,18 +106,22 @@ export async function getProfile(address: Address): Promise<ProfileShape> {
   }
 
   const lowerAddress = address.toLowerCase()
-  const [{ data: profile }, { data: social }] = await Promise.all([
-    supabase
-      .from('profiles')
-      .select('wallet_address,username,bio,pfp_url,banner_url,discord')
-      .eq('wallet_address', lowerAddress)
-      .maybeSingle<ProfileRow>(),
-    supabase
-      .from('social_connections')
-      .select('wallet_address,twitter_handle,discord_username')
-      .eq('wallet_address', lowerAddress)
-      .maybeSingle<SocialConnectionRow>(),
-  ])
+  const [{ data: profile }, { data: social }] = await withTimeout(
+    Promise.all([
+      supabase
+        .from('profiles')
+        .select('wallet_address,username,bio,pfp_url,banner_url,discord')
+        .eq('wallet_address', lowerAddress)
+        .maybeSingle<ProfileRow>(),
+      supabase
+        .from('social_connections')
+        .select('wallet_address,twitter_handle,discord_username')
+        .eq('wallet_address', lowerAddress)
+        .maybeSingle<SocialConnectionRow>(),
+    ]),
+    PROFILE_QUERY_TIMEOUT_MS,
+    [{ data: null }, { data: null }] as [{ data: ProfileRow | null }, { data: SocialConnectionRow | null }]
+  )
 
   const profileShape = {
     address,
@@ -151,18 +155,22 @@ export async function getProfilesBatch(addresses: Address[]) {
   }
 
   const lower = addresses.map((a) => a.toLowerCase())
-  const [{ data: profilesData }, { data: socialsData }] = await Promise.all([
-    supabase
-      .from('profiles')
-      .select('wallet_address,username,pfp_url')
-      .in('wallet_address', lower)
-      .returns<ProfileRow[]>(),
-    supabase
-      .from('social_connections')
-      .select('wallet_address,twitter_handle,discord_username')
-      .in('wallet_address', lower)
-      .returns<SocialConnectionRow[]>(),
-  ])
+  const [{ data: profilesData }, { data: socialsData }] = await withTimeout(
+    Promise.all([
+      supabase
+        .from('profiles')
+        .select('wallet_address,username,pfp_url')
+        .in('wallet_address', lower)
+        .returns<ProfileRow[]>(),
+      supabase
+        .from('social_connections')
+        .select('wallet_address,twitter_handle,discord_username')
+        .in('wallet_address', lower)
+        .returns<SocialConnectionRow[]>(),
+    ]),
+    PROFILE_QUERY_TIMEOUT_MS,
+    [{ data: [] }, { data: [] }] as [{ data: ProfileRow[] }, { data: SocialConnectionRow[] }]
+  )
 
   const profilesByAddress = new Map((profilesData ?? []).map((row) => [
     row.wallet_address.toLowerCase(),
