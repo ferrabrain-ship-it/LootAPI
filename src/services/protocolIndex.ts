@@ -543,7 +543,7 @@ export async function getIndexedLockSnapshot() {
       )
       select
         coalesce(sum(case when locked_amount > 0 then locked_amount else 0 end), 0)::text as protocol_locked,
-        count(*) filter (where locked_amount > 0)::text as lockers,
+        (count(*) filter (where locked_amount > 0))::text as lockers,
         (select total_notified from rewards),
         coalesce((select protocol_weight from latest_weight), '0') as protocol_weight
       from locked
