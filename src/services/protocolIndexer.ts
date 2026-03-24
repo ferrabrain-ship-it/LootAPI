@@ -27,6 +27,7 @@ const BUYBACK_EVENT = parseAbiItem(
 const TRANSFER_EVENT = parseAbiItem('event Transfer(address indexed from, address indexed to, uint256 value)')
 const STAKE_DEPOSIT_EVENT = parseAbiItem('event Deposited(address indexed user, uint256 amount, uint256 newBalance)')
 const STAKE_WITHDRAW_EVENT = parseAbiItem('event Withdrawn(address indexed user, uint256 amount, uint256 newBalance)')
+const STAKE_COMPOUND_EVENT = parseAbiItem('event YieldCompounded(address indexed user, uint256 amount, address indexed compounder, uint256 fee)')
 const YIELD_DISTRIBUTED_EVENT = parseAbiItem('event YieldDistributed(uint256 amount, uint256 newAccYieldPerShare)')
 const LOCK_REWARD_NOTIFIED_EVENT = parseAbiItem(
   'event RewardNotified(uint256 amount, uint256 distributedAmount, uint256 unallocatedAmount, uint256 accRewardPerWeight)'
