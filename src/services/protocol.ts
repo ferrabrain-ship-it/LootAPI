@@ -1775,7 +1775,6 @@ export async function getRounds(page = 1, limit = 12, lootpotOnly = false) {
         roundIds = logs.filter((log) => toBigInt(log.args.lootpotAmount ?? 0n) > 0n).map((log) => Number(log.args.roundId))
 
         roundIds = [...new Set(roundIds)]
-          .filter((roundId) => BigInt(roundId) >= minRoundId)
           .sort((a, b) => b - a)
         const total = roundIds.length
         const pages = Math.max(1, Math.ceil(total / limit))
