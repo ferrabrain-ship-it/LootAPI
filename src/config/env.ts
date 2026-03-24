@@ -52,6 +52,7 @@ export const env = {
   lootpotLookbackBlocks: toBigInt(process.env.LOOTPOT_LOOKBACK_BLOCKS, 21600n),
   lootpotPollIntervalMs: toNumber(process.env.LOOTPOT_POLL_INTERVAL_MS, 120000),
   lootpotWorkerTest: process.env.LOOTPOT_WORKER_TEST === 'true',
+  cacheWarmIntervalMs: toNumber(process.env.CACHE_WARM_INTERVAL_MS, 120000),
   rpcPrimary: process.env.RPC_URL_PRIMARY || 'https://mainnet.base.org',
   rpcFallback1: process.env.RPC_URL_FALLBACK_1 || 'https://base.llamarpc.com',
   rpcFallback2: process.env.RPC_URL_FALLBACK_2 || 'https://rpc.ankr.com/base',
