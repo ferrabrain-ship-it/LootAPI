@@ -42,6 +42,7 @@ const TRANSFER_EVENT = parseAbiItem('event Transfer(address indexed from, addres
 const VAULT_EVENT = parseAbiItem('event VaultReceived(uint256 amount, uint256 totalVaulted)')
 const STAKE_DEPOSIT_EVENT = parseAbiItem('event Deposited(address indexed user, uint256 amount, uint256 newBalance)')
 const STAKE_WITHDRAW_EVENT = parseAbiItem('event Withdrawn(address indexed user, uint256 amount, uint256 newBalance)')
+const STAKE_COMPOUND_EVENT = parseAbiItem('event YieldCompounded(address indexed user, uint256 amount, address indexed compounder, uint256 fee)')
 const YIELD_DISTRIBUTED_EVENT = parseAbiItem('event YieldDistributed(uint256 amount, uint256 newAccYieldPerShare)')
 const CHECKPOINTED_EVENT = parseAbiItem('event Checkpointed(uint64 indexed roundId, address indexed user, uint256 ethReward, uint256 lootReward)')
 const CLAIMED_LOOT_EVENT = parseAbiItem('event ClaimedLOOT(address indexed user, uint256 minedLoot, uint256 forgedLoot, uint256 fee, uint256 net)')
@@ -1011,11 +1012,21 @@ async function getStakeWithdrawLogs() {
   })
 }
 
+async function getStakeCompoundLogs() {
+  return getCachedLogsPaged('staking:compounds', GLOBAL_LOG_CACHE_TTL_MS, {
+    address: CONTRACTS.staking,
+    event: STAKE_COMPOUND_EVENT,
+    fromBlock: env.scanStartBlock,
+    toBlock: 'latest',
+  })
+}
+
 async function getStakeSnapshot() {
   return withCache('snapshot:staking:balances', GLOBAL_LOG_CACHE_TTL_MS, async (): Promise<StakeSnapshot> => {
-    const [deposits, withdrawals] = await Promise.all([
+    const [deposits, withdrawals, compounds] = await Promise.all([
       getStakeDepositLogs(),
       getStakeWithdrawLogs(),
+      getStakeCompoundLogs(),
     ])
     const balances = new Map<string, bigint>()
 
@@ -1027,6 +1038,11 @@ async function getStakeSnapshot() {
     for (const log of withdrawals) {
       const address = normalizeAddress(log.args.user)
       balances.set(address, (balances.get(address) ?? 0n) - toBigInt(log.args.amount))
+    }
+
+    for (const log of compounds) {
+      const address = normalizeAddress(log.args.user)
+      balances.set(address, (balances.get(address) ?? 0n) + toBigInt(log.args.amount))
     }
 
     return { balances }
@@ -1877,48 +1893,76 @@ export async function getBuybacks(page = 1, limit = 12) {
 
 export async function getStakingStats() {
   return withCache('staking-stats', HEAVY_ROUTE_CACHE_TTL_MS, async () => {
-    const [globalStats, stakeTokenBalance, price, yieldLogs] = await Promise.all([
-      withRpcRetries(() => publicClient.readContract({
-        address: CONTRACTS.staking,
-        abi: stakingAbi,
-        functionName: 'getGlobalStats',
-      }) as Promise<[bigint, bigint, bigint]>),
-      withRpcRetries(() => publicClient.readContract({
-        address: CONTRACTS.loot,
-        abi: lootAbi,
-        functionName: 'balanceOf',
-        args: [CONTRACTS.staking],
-      }) as Promise<bigint>),
-      getLootPrice(),
-      getYieldDistributedLogs(),
-    ])
+    return preferIndexed(
+      async () => {
+        const indexed = await getIndexedStakingSnapshot()
+        if (!indexed) return null
 
-    const totalStaked = globalStats[0]
-    const tvlUsd = Number(formatEther(totalStaked)) * price.priceUsd
+        const [stakeTokenBalance, price] = await Promise.all([
+          withRpcRetries(() => publicClient.readContract({
+            address: CONTRACTS.loot,
+            abi: lootAbi,
+            functionName: 'balanceOf',
+            args: [CONTRACTS.staking],
+          }) as Promise<bigint>),
+          getLootPrice(),
+        ])
 
-    const now = Date.now()
-    const stakingAprWindowMs = STAKING_APR_WINDOW_DAYS * 24 * 60 * 60 * 1000
-    let yieldInWindow = 0n
-    for (const log of yieldLogs) {
-      const ts = await getBlockTimestampMs(log.blockNumber)
-      if (ts >= now - stakingAprWindowMs) {
-        yieldInWindow += toBigInt(log.args.amount)
+        const totalStaked = BigInt(indexed.totalStaked)
+        const tvlUsd = Number(formatEther(totalStaked)) * price.priceUsd
+
+        return {
+          ...indexed,
+          contractLootBalance: stakeTokenBalance.toString(),
+          contractLootBalanceFormatted: etherString(stakeTokenBalance),
+          tvlUsd: tvlUsd.toFixed(2),
+        }
+      },
+      async () => {
+        const [globalStats, stakeTokenBalance, price, yieldLogs] = await Promise.all([
+          withRpcRetries(() => publicClient.readContract({
+            address: CONTRACTS.staking,
+            abi: stakingAbi,
+            functionName: 'getGlobalStats',
+          }) as Promise<[bigint, bigint, bigint]>),
+          withRpcRetries(() => publicClient.readContract({
+            address: CONTRACTS.loot,
+            abi: lootAbi,
+            functionName: 'balanceOf',
+            args: [CONTRACTS.staking],
+          }) as Promise<bigint>),
+          getLootPrice(),
+          getYieldDistributedLogs(),
+        ])
+
+        const totalStaked = globalStats[0]
+        const tvlUsd = Number(formatEther(totalStaked)) * price.priceUsd
+
+        const now = Date.now()
+        const stakingAprWindowMs = STAKING_APR_WINDOW_DAYS * 24 * 60 * 60 * 1000
+        let yieldInWindow = 0n
+        for (const log of yieldLogs) {
+          const ts = await getBlockTimestampMs(log.blockNumber)
+          if (ts >= now - stakingAprWindowMs) {
+            yieldInWindow += toBigInt(log.args.amount)
+          }
+        }
+        const apr = totalStaked > 0n
+          ? (Number(formatEther(yieldInWindow)) * (365 / STAKING_APR_WINDOW_DAYS) / Number(formatEther(totalStaked))) * 100
+          : 0
+
+        return {
+          totalStaked: totalStaked.toString(),
+          totalStakedFormatted: etherString(totalStaked),
+          totalYieldDistributed: globalStats[1].toString(),
+          totalYieldDistributedFormatted: etherString(globalStats[1]),
+          contractLootBalance: stakeTokenBalance.toString(),
+          contractLootBalanceFormatted: etherString(stakeTokenBalance),
+          apr: apr.toFixed(2),
+          tvlUsd: tvlUsd.toFixed(2),
+        }
       }
-    }
-    const apr = totalStaked > 0n
-      ? (Number(formatEther(yieldInWindow)) * (365 / STAKING_APR_WINDOW_DAYS) / Number(formatEther(totalStaked))) * 100
-      : 0
-
-    return {
-      totalStaked: totalStaked.toString(),
-      totalStakedFormatted: etherString(totalStaked),
-      totalYieldDistributed: globalStats[1].toString(),
-      totalYieldDistributedFormatted: etherString(globalStats[1]),
-      contractLootBalance: stakeTokenBalance.toString(),
-      contractLootBalanceFormatted: etherString(stakeTokenBalance),
-      apr: apr.toFixed(2),
-      tvlUsd: tvlUsd.toFixed(2),
-    }
+    )
   }, {
     staleWhileRevalidate: true,
     maxStaleMs: HEAVY_CACHE_MAX_STALE_MS,
