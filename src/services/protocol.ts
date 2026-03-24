@@ -9,6 +9,21 @@ import { CONTRACTS, PROTOCOL_CONSTANTS } from '../config/contracts.js'
 import { env } from '../config/env.js'
 import { publicClient } from '../lib/client.js'
 import { countSelectedBlocks, decodeBlockMask, etherFixed, etherString, relativeTime, safeAddressEq, toBigInt } from '../lib/format.js'
+import {
+  getIndexedBuybacks,
+  getIndexedLeaderboardEarners,
+  getIndexedLeaderboardLockers,
+  getIndexedLeaderboardMiners,
+  getIndexedLeaderboardStakers,
+  getIndexedLockDistributions,
+  getIndexedLockSnapshot,
+  getIndexedRound,
+  getIndexedRoundMiners,
+  getIndexedRounds,
+  getIndexedStakingSnapshot,
+  getIndexedTreasuryStats,
+  getIndexedUserHistory,
+} from './protocolIndex.js'
 
 const DEPLOYED_EVENT = parseAbiItem(
   'event Deployed(uint64 indexed roundId, address indexed user, uint256 amountPerBlock, uint256 blockMask, uint256 totalAmount)'
@@ -218,6 +233,19 @@ async function withCache<T>(key: string, ttlMs: number, loader: () => Promise<T>
 
   inflightCache.set(key, promise)
   return promise
+}
+
+async function preferIndexed<T>(indexedLoader: () => Promise<T | null>, fallbackLoader: () => Promise<T>) {
+  try {
+    const indexed = await indexedLoader()
+    if (indexed !== null) {
+      return indexed
+    }
+  } catch (error) {
+    console.warn(`[protocol-index] falling back to chain: ${error instanceof Error ? error.message : String(error)}`)
+  }
+
+  return fallbackLoader()
 }
 
 function normalizeAddress(value: unknown): Address {
@@ -1410,7 +1438,7 @@ async function getRoundState(roundId: bigint) {
 
 export async function getRound(roundIdInput: string | number | bigint) {
   const roundId = BigInt(roundIdInput)
-  const load = async () => {
+  const loadFromChain = async () => {
     const roundState = await getRoundState(roundId)
 
     if (roundState.totalDeployed === 0n || roundState.winnersDeployed === 0n) {
@@ -1470,6 +1498,11 @@ export async function getRound(roundIdInput: string | number | bigint) {
     }
   }
 
+  const load = () => preferIndexed(
+    () => getIndexedRound(roundId),
+    loadFromChain
+  )
+
   if (await isRecentRound(roundId)) {
     return load()
   }
@@ -1479,7 +1512,7 @@ export async function getRound(roundIdInput: string | number | bigint) {
 
 export async function getRoundMiners(roundIdInput: string | number | bigint) {
   const roundId = BigInt(roundIdInput)
-  const load = async () => {
+  const loadFromChain = async () => {
     const roundState = await getRoundState(roundId)
 
     if (roundState.totalDeployed === 0n || roundState.winnersDeployed === 0n) {
@@ -1536,6 +1569,11 @@ export async function getRoundMiners(roundIdInput: string | number | bigint) {
     }
   }
 
+  const load = () => preferIndexed(
+    () => getIndexedRoundMiners(roundId),
+    loadFromChain
+  )
+
   if (await isRecentRound(roundId)) {
     return load()
   }
@@ -1545,46 +1583,51 @@ export async function getRoundMiners(roundIdInput: string | number | bigint) {
 
 export async function getRounds(page = 1, limit = 12, lootpotOnly = false) {
   return withCache(`rounds:${page}:${limit}:${lootpotOnly ? 'lootpot' : 'all'}`, HEAVY_ROUTE_CACHE_TTL_MS, async () => {
-    const status = await getProtocolStatus()
-    if (!status.gameStarted || status.currentRoundId === 0n) {
-      return {
-        rounds: [],
-        pagination: { page, limit, total: 0, pages: 1 },
+    return preferIndexed(
+      () => getIndexedRounds(page, limit, lootpotOnly),
+      async () => {
+        const status = await getProtocolStatus()
+        if (!status.gameStarted || status.currentRoundId === 0n) {
+          return {
+            rounds: [],
+            pagination: { page, limit, total: 0, pages: 1 },
+          }
+        }
+
+        if (!lootpotOnly) {
+          const total = Number(status.currentRoundId > 0n ? status.currentRoundId - 1n : 0n)
+          const pages = Math.max(1, Math.ceil(total / limit))
+          const startRound = total - ((page - 1) * limit)
+          const endRound = Math.max(startRound - limit + 1, 1)
+          const slice: number[] = []
+
+          for (let roundId = startRound; roundId >= endRound; roundId -= 1) {
+            if (roundId > 0) slice.push(roundId)
+          }
+
+          const rounds = await mapWithConcurrency(slice, 4, async (roundId) => getRound(roundId))
+          return {
+            rounds,
+            pagination: { page, limit, total, pages },
+          }
+        }
+
+        const logs = await getRoundSettledLogs()
+        let roundIds = logs.map((log) => Number(log.args.roundId))
+        roundIds = logs.filter((log) => toBigInt(log.args.lootpotAmount ?? 0n) > 0n).map((log) => Number(log.args.roundId))
+
+        roundIds = [...new Set(roundIds)].sort((a, b) => b - a)
+        const total = roundIds.length
+        const pages = Math.max(1, Math.ceil(total / limit))
+        const slice = roundIds.slice((page - 1) * limit, page * limit)
+
+        const rounds = await mapWithConcurrency(slice, 4, async (roundId) => getRound(roundId))
+        return {
+          rounds,
+          pagination: { page, limit, total, pages },
+        }
       }
-    }
-
-    if (!lootpotOnly) {
-      const total = Number(status.currentRoundId > 0n ? status.currentRoundId - 1n : 0n)
-      const pages = Math.max(1, Math.ceil(total / limit))
-      const startRound = total - ((page - 1) * limit)
-      const endRound = Math.max(startRound - limit + 1, 1)
-      const slice: number[] = []
-
-      for (let roundId = startRound; roundId >= endRound; roundId -= 1) {
-        if (roundId > 0) slice.push(roundId)
-      }
-
-      const rounds = await mapWithConcurrency(slice, 4, async (roundId) => getRound(roundId))
-      return {
-        rounds,
-        pagination: { page, limit, total, pages },
-      }
-    }
-
-    const logs = await getRoundSettledLogs()
-    let roundIds = logs.map((log) => Number(log.args.roundId))
-    roundIds = logs.filter((log) => toBigInt(log.args.lootpotAmount ?? 0n) > 0n).map((log) => Number(log.args.roundId))
-
-    roundIds = [...new Set(roundIds)].sort((a, b) => b - a)
-    const total = roundIds.length
-    const pages = Math.max(1, Math.ceil(total / limit))
-    const slice = roundIds.slice((page - 1) * limit, page * limit)
-
-    const rounds = await mapWithConcurrency(slice, 4, async (roundId) => getRound(roundId))
-    return {
-      rounds,
-      pagination: { page, limit, total, pages },
-    }
+    )
   }, {
     staleWhileRevalidate: true,
     maxStaleMs: HEAVY_CACHE_MAX_STALE_MS,
