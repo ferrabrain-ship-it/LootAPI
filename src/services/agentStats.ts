@@ -214,6 +214,19 @@ async function mapWithConcurrency<T, R>(items: T[], concurrency: number, mapper:
   return results
 }
 
+interface RoundMinerEntry {
+  address: Address
+  ethReward: string
+  lootReward: string
+}
+
+function getMinerEntries(payload: Awaited<ReturnType<typeof getRoundMiners>> | null | undefined): RoundMinerEntry[] {
+  if (!payload) return []
+  const candidate = payload as { miners?: unknown }
+  if (!Array.isArray(candidate.miners)) return []
+  return candidate.miners as RoundMinerEntry[]
+}
+
 async function getLootPriceNativeEth() {
   const response = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${CONTRACTS.loot}`, {
     cache: 'no-store',
@@ -256,7 +269,7 @@ async function enrichDeploymentLog(
   const blockMask = toBigInt(log.args.blockMask)
   const selectedBlocks = decodeBlockMask(blockMask)
   const totalAmountWei = toBigInt(log.args.totalAmount)
-  const userMiner = miners.miners.find((miner) => safeAddressEq(miner.address, walletAddress))
+  const userMiner = getMinerEntries(miners).find((miner) => safeAddressEq(miner.address, walletAddress))
   const rewardsEthWei = userMiner ? BigInt(userMiner.ethReward) : 0n
   const lootEarnedWei = userMiner ? BigInt(userMiner.lootReward) : 0n
   const deployedEth = Number(formatEther(totalAmountWei))
@@ -628,9 +641,10 @@ async function refreshCurrentValueFields(client: PoolClient, walletAddress: Addr
 }
 
 async function replaceRecentRows(client: PoolClient, walletAddress: Address, rounds: EnrichedAgentRound[]) {
-  await client.query('delete from agent_recent_rounds where wallet_address = $1', [walletAddress.toLowerCase()])
+  const normalizedWallet = walletAddress.toLowerCase()
 
   if (rounds.length === 0) {
+    await client.query('delete from agent_recent_rounds where wallet_address = $1', [normalizedWallet])
     return
   }
 
@@ -638,7 +652,7 @@ async function replaceRecentRows(client: PoolClient, walletAddress: Address, rou
   const placeholders = rounds.map((round, index) => {
     const offset = index * 14
     values.push(
-      walletAddress.toLowerCase(),
+      normalizedWallet,
       round.roundId,
       round.blockNumber,
       round.blocksCovered,
@@ -676,8 +690,32 @@ async function replaceRecentRows(client: PoolClient, walletAddress: Address, rou
         round_timestamp
       )
       values ${placeholders.join(', ')}
+      on conflict (wallet_address, round_id) do update
+      set
+        block_number = excluded.block_number,
+        blocks_covered = excluded.blocks_covered,
+        deployed_eth = excluded.deployed_eth,
+        rewards_eth = excluded.rewards_eth,
+        loot_earned = excluded.loot_earned,
+        loot_value_eth = excluded.loot_value_eth,
+        pnl_eth = excluded.pnl_eth,
+        true_pnl_eth = excluded.true_pnl_eth,
+        pnl_pct = excluded.pnl_pct,
+        outcome = excluded.outcome,
+        mode = excluded.mode,
+        round_timestamp = excluded.round_timestamp
     `,
     values
+  )
+
+  const keepRoundIds = rounds.map((round) => BigInt(round.roundId).toString())
+  await client.query(
+    `
+      delete from agent_recent_rounds
+      where wallet_address = $1
+        and not (round_id = any($2::bigint[]))
+    `,
+    [normalizedWallet, keepRoundIds]
   )
 }
 
@@ -944,7 +982,6 @@ function triggerAgentWalletSync(walletAddress: Address, logger: Logger = console
   const promise = syncAgentWalletStats(walletAddress, logger)
     .catch((error) => {
       logger.error(`[agent-stats] sync failed for ${walletAddress}`, error)
-      throw error
     })
     .finally(() => {
       inflight.delete(key)
