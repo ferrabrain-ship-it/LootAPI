@@ -1928,16 +1928,19 @@ export async function getTreasuryStats() {
       () => getIndexedTreasuryStats(),
       async () => {
         const status = await getProtocolStatus()
-        const [stats, totalVaultedLifetime, standaloneBurnLogs] = await Promise.all([
+        const [stats, vaultLogs, standaloneBurnLogs] = await Promise.all([
           withRpcRetries(() => publicClient.readContract({
             address: CONTRACTS.treasury,
             abi: treasuryAbi,
             functionName: 'getStats',
           }) as Promise<[bigint, bigint, bigint, bigint]>),
-          status.currentRoundId === 0n ? Promise.resolve(0n) : getLatestVaultTotal(),
+          status.currentRoundId === 0n ? Promise.resolve([]) : getVaultLogs(),
           getStandaloneBurnLogs(),
         ])
 
+        const totalVaultedLifetime = vaultLogs.reduce((sum, log) => (
+          sum + toBigInt(log.args.amount ?? 0n)
+        ), 0n)
         const directBurnedLifetime = standaloneBurnLogs.reduce((sum, log) => sum + toBigInt(log.args.value), 0n)
         const totalBurnedLifetime = stats[1] + directBurnedLifetime
 

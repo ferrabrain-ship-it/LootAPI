@@ -87,6 +87,28 @@ function toIsoString(value: Date | string | null | undefined) {
   return Number.isFinite(parsed.getTime()) ? parsed.toISOString() : null
 }
 
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  mapper: (item: T, index: number) => Promise<R>
+): Promise<R[]> {
+  if (items.length === 0) return []
+  const safeConcurrency = Math.max(1, Math.min(concurrency, items.length))
+  const results = new Array<R>(items.length)
+  let nextIndex = 0
+
+  const workers = Array.from({ length: safeConcurrency }, async () => {
+    while (nextIndex < items.length) {
+      const current = nextIndex
+      nextIndex += 1
+      results[current] = await mapper(items[current], current)
+    }
+  })
+
+  await Promise.all(workers)
+  return results
+}
+
 async function getLatestHeadBlock() {
   const now = Date.now()
   if (latestHeadCache && latestHeadCache.expiresAt > now) {
@@ -390,19 +412,20 @@ export async function getIndexedTreasuryStats() {
   return withProtocolIndex(['treasury_vault', 'treasury_buybacks', 'direct_burns'], async (client) => {
     const result = await client.query<{
       total_vaulted: string
-      eth_spent: string
+      current_vaulted: string
       buyback_burned: string
       direct_burned: string
       total_distributed_to_stakers: string
       total_buybacks: string
     }>(`
       with vault as (
-        select coalesce(max(total_vaulted), 0) as total_vaulted
+        select
+          coalesce(sum(amount), 0) as total_vaulted,
+          coalesce((array_agg(total_vaulted order by block_number desc, log_index desc))[1], 0) as current_vaulted
         from protocol_treasury_vault_events
       ),
       buybacks as (
         select
-          coalesce(sum(eth_spent), 0) as eth_spent,
           coalesce(sum(loot_burned), 0) as buyback_burned,
           coalesce(sum(loot_to_stakers), 0) as total_distributed_to_stakers,
           count(*)::text as total_buybacks
@@ -418,7 +441,7 @@ export async function getIndexedTreasuryStats() {
       )
       select
         vault.total_vaulted::text,
-        buybacks.eth_spent::text,
+        vault.current_vaulted::text,
         buybacks.buyback_burned::text,
         burns.direct_burned::text,
         buybacks.total_distributed_to_stakers::text,
@@ -428,10 +451,9 @@ export async function getIndexedTreasuryStats() {
 
     const row = result.rows[0]
     const totalVaulted = toBigInt(row.total_vaulted)
-    const ethSpent = toBigInt(row.eth_spent)
+    const currentVaulted = toBigInt(row.current_vaulted)
     const buybackBurned = toBigInt(row.buyback_burned)
     const directBurned = toBigInt(row.direct_burned)
-    const currentVaulted = totalVaulted > ethSpent ? totalVaulted - ethSpent : 0n
     const totalBurned = buybackBurned + directBurned
 
     return {
@@ -842,55 +864,86 @@ export async function getIndexedLeaderboardLockers(limit = 12) {
 }
 
 export async function getIndexedLeaderboardEarners(limit = 12) {
-  return withProtocolIndex(['checkpoints', 'claimed_loot'], async (client) => {
+  return withProtocolIndex(['deployments_direct', 'deployments_for'], async (client) => {
+    const candidateLimit = Math.max(limit * 40, 400)
     const result = await client.query<CheckpointAggRow>(
       `
-        with checkpoint_totals as (
+        with deployers as (
           select
-            user_address,
-            coalesce(sum(loot_reward), 0) as total_checkpoint_loot
+            user_address as address,
+            sum(total_amount) as total_deployed
+          from protocol_deployments
+          group by user_address
+          order by total_deployed desc
+          limit $1
+        ),
+        checkpointers as (
+          select
+            user_address as address,
+            sum(loot_reward) as total_loot
           from protocol_checkpoints
           group by user_address
+          order by total_loot desc
+          limit $2
         ),
-        claimed_totals as (
-          select
-            user_address,
-            coalesce(sum(mined_loot), 0) as total_claimed_mined
-          from protocol_claimed_loot
-          group by user_address
-        ),
-        pending as (
-          select
-            coalesce(c.user_address, cl.user_address) as address,
-            greatest(
-              coalesce(c.total_checkpoint_loot, 0) - coalesce(cl.total_claimed_mined, 0),
-              0
-            ) as unforged_pending
-          from checkpoint_totals c
-          full outer join claimed_totals cl on cl.user_address = c.user_address
+        candidates as (
+          select address from deployers
+          union
+          select address from checkpointers
         )
-        select
-          address,
-          unforged_pending::text as gross
-        from pending
-        where unforged_pending > 0
-        order by unforged_pending desc
-        limit $1
+        select address, '0'::text as gross
+        from candidates
       `,
-      [limit]
+      [candidateLimit, candidateLimit]
     )
 
-    const earners = result.rows.map((row) => ({
-      address: getAddress(row.address),
-      unforged: row.gross,
-      unforgedFormatted: etherString(toBigInt(row.gross)),
-      gross: row.gross,
-      grossFormatted: etherString(toBigInt(row.gross)),
+    const addresses = result.rows
+      .map((row) => row.address)
+      .filter((address) => !!address)
+      .map((address) => getAddress(address))
+
+    const batchSize = 100
+    const chunks: Address[][] = []
+    for (let index = 0; index < addresses.length; index += batchSize) {
+      chunks.push(addresses.slice(index, index + batchSize))
+    }
+
+    const allPending = (await mapWithConcurrency(chunks, 4, async (chunk) => {
+      const response = await publicClient.multicall({
+        contracts: chunk.map((address) => ({
+          address: CONTRACTS.gridMining,
+          abi: gridMiningAbi as never,
+          functionName: 'getTotalPendingRewards',
+          args: [address],
+        })),
+        allowFailure: true,
+      })
+
+      return response.flatMap((item, idx) => {
+        if (item.status !== 'success') return []
+        const values = item.result as readonly [bigint, bigint, bigint, bigint]
+        const unforged = values[1]
+        if (unforged <= 0n) return []
+        return [{
+          address: chunk[idx],
+          unforged,
+        }]
+      })
+    })).flat()
+
+    allPending.sort((a, b) => (b.unforged > a.unforged ? 1 : -1))
+
+    const earners = allPending.slice(0, limit).map((item) => ({
+      address: item.address,
+      unforged: item.unforged.toString(),
+      unforgedFormatted: etherString(item.unforged),
+      gross: item.unforged.toString(),
+      grossFormatted: etherString(item.unforged),
     }))
 
     return {
       earners,
-      pagination: { page: 1, limit, total: earners.length, pages: 1 },
+      pagination: { page: 1, limit, total: allPending.length, pages: 1 },
     }
   }, {
     maxLagBlocks: INDEX_UNFORGED_MAX_LAG_BLOCKS,
