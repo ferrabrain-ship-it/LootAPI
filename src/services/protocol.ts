@@ -2381,23 +2381,25 @@ export async function getLockDistributions(page = 1, limit = 12) {
 
 export async function getLeaderboardLockers(limit = 12) {
   return withCache(`leaderboard-lockers:${limit}`, HEAVY_ROUTE_CACHE_TTL_MS, async () => {
-    const snapshot = await getLockerSnapshot()
-    const lockers = [...snapshot.userLocked.entries()]
-      .filter(([, locked]) => locked > 0n)
-      .sort((a, b) => (b[1] > a[1] ? 1 : -1))
-      .slice(0, limit)
-      .map(([address, locked]) => {
-        const weight = snapshot.userWeight.get(address) ?? 0n
-        return {
-          address,
-          locked: locked.toString(),
-          lockedFormatted: etherString(locked),
-          weight: weight.toString(),
-          weightFormatted: etherString(weight),
-        }
-      })
+    return preferIndexed(() => getIndexedLeaderboardLockers(limit), async () => {
+      const snapshot = await getLockerSnapshot()
+      const lockers = [...snapshot.userLocked.entries()]
+        .filter(([, locked]) => locked > 0n)
+        .sort((a, b) => (b[1] > a[1] ? 1 : -1))
+        .slice(0, limit)
+        .map(([address, locked]) => {
+          const weight = snapshot.userWeight.get(address) ?? 0n
+          return {
+            address,
+            locked: locked.toString(),
+            lockedFormatted: etherString(locked),
+            weight: weight.toString(),
+            weightFormatted: etherString(weight),
+          }
+        })
 
-    return { lockers }
+      return { lockers }
+    })
   }, {
     staleWhileRevalidate: true,
     maxStaleMs: HEAVY_CACHE_MAX_STALE_MS,
@@ -2406,27 +2408,29 @@ export async function getLeaderboardLockers(limit = 12) {
 
 export async function getLeaderboardMiners(limit = 12) {
   return withCache(`leaderboard-miners:${limit}`, HEAVY_ROUTE_CACHE_TTL_MS, async () => {
-    const status = await getProtocolStatus()
-    if (!status.gameStarted || status.currentRoundId === 0n) {
-      return { period: 'recent', miners: [], deployers: [] }
-    }
+    return preferIndexed(() => getIndexedLeaderboardMiners(limit), async () => {
+      const status = await getProtocolStatus()
+      if (!status.gameStarted || status.currentRoundId === 0n) {
+        return { period: 'recent', miners: [], deployers: [] }
+      }
 
-    const snapshot = await getRecentDeploymentTotals()
-    const deployers = [...snapshot.totalsByUser.entries()]
-        .sort((a, b) => (b[1] > a[1] ? 1 : -1))
-        .slice(0, limit)
-        .map(([address, totalDeployed]) => ({
-          address,
-          totalDeployed: totalDeployed.toString(),
-          totalDeployedFormatted: etherString(totalDeployed),
-          roundsPlayed: 0,
-        }))
+      const snapshot = await getRecentDeploymentTotals()
+      const deployers = [...snapshot.totalsByUser.entries()]
+          .sort((a, b) => (b[1] > a[1] ? 1 : -1))
+          .slice(0, limit)
+          .map(([address, totalDeployed]) => ({
+            address,
+            totalDeployed: totalDeployed.toString(),
+            totalDeployedFormatted: etherString(totalDeployed),
+            roundsPlayed: 0,
+          }))
 
-    return {
-      period: 'recent',
-      miners: deployers,
-      deployers,
-    }
+      return {
+        period: 'recent',
+        miners: deployers,
+        deployers,
+      }
+    })
   }, {
     staleWhileRevalidate: true,
     maxStaleMs: HEAVY_CACHE_MAX_STALE_MS,
@@ -2435,20 +2439,22 @@ export async function getLeaderboardMiners(limit = 12) {
 
 export async function getLeaderboardStakers(limit = 12) {
   return withCache(`leaderboard-stakers:${limit}`, HEAVY_ROUTE_CACHE_TTL_MS, async () => {
-    const snapshot = await getStakeSnapshot()
-    const stakers = [...snapshot.balances.entries()]
-        .filter(([, balance]) => balance > 0n)
-        .sort((a, b) => (b[1] > a[1] ? 1 : -1))
-        .slice(0, limit)
-        .map(([address, balance]) => ({
-          address,
-          balance: balance.toString(),
-          balanceFormatted: etherString(balance),
-          stakedBalance: balance.toString(),
-          stakedBalanceFormatted: etherString(balance),
-        }))
+    return preferIndexed(() => getIndexedLeaderboardStakers(limit), async () => {
+      const snapshot = await getStakeSnapshot()
+      const stakers = [...snapshot.balances.entries()]
+          .filter(([, balance]) => balance > 0n)
+          .sort((a, b) => (b[1] > a[1] ? 1 : -1))
+          .slice(0, limit)
+          .map(([address, balance]) => ({
+            address,
+            balance: balance.toString(),
+            balanceFormatted: etherString(balance),
+            stakedBalance: balance.toString(),
+            stakedBalanceFormatted: etherString(balance),
+          }))
 
-    return { stakers }
+      return { stakers }
+    })
   }, {
     staleWhileRevalidate: true,
     maxStaleMs: HEAVY_CACHE_MAX_STALE_MS,
@@ -2457,49 +2463,51 @@ export async function getLeaderboardStakers(limit = 12) {
 
 export async function getLeaderboardEarners(limit = 12) {
   return withCache(`leaderboard-earners:${limit}`, HEAVY_ROUTE_CACHE_TTL_MS, async () => {
-    const status = await getProtocolStatus()
-    if (!status.gameStarted || status.currentRoundId === 0n) {
-      return {
-        earners: [],
-        pagination: { page: 1, limit, total: 0, pages: 1 },
-      }
-    }
-
-    const checkpointLogs = await getRecentCheckpointLogs()
-    const users = [...new Set(
-      [...checkpointLogs]
-        .sort(compareLogsDesc)
-        .map((log) => normalizeAddress(log.args.user))
-    )].slice(0, Math.max(limit * 4, 48))
-    const rewards = (await mapWithConcurrency(users, LEADERBOARD_EARNERS_CONCURRENCY, async (address) => {
-      try {
+    return preferIndexed(() => getIndexedLeaderboardEarners(limit), async () => {
+      const status = await getProtocolStatus()
+      if (!status.gameStarted || status.currentRoundId === 0n) {
         return {
-          address,
-          rewards: await getUserRewards(address),
+          earners: [],
+          pagination: { page: 1, limit, total: 0, pages: 1 },
         }
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
-        console.warn(`[leaderboard-earners] skipped ${address}: ${message}`)
-        return null
       }
-    })).filter((entry) => entry !== null)
 
-    const earners = rewards
-        .map(({ address, rewards }) => ({
-          address,
-          unforged: rewards.pendingLOOT.unforged,
-          unforgedFormatted: rewards.pendingLOOT.unforgedFormatted,
-          gross: rewards.pendingLOOT.gross,
-          grossFormatted: rewards.pendingLOOT.grossFormatted,
-        }))
-        .filter((item) => BigInt(item.unforged) > 0n)
-        .sort((a, b) => (BigInt(b.unforged) > BigInt(a.unforged) ? 1 : -1))
-        .slice(0, limit)
+      const checkpointLogs = await getRecentCheckpointLogs()
+      const users = [...new Set(
+        [...checkpointLogs]
+          .sort(compareLogsDesc)
+          .map((log) => normalizeAddress(log.args.user))
+      )].slice(0, Math.max(limit * 4, 48))
+      const rewards = (await mapWithConcurrency(users, LEADERBOARD_EARNERS_CONCURRENCY, async (address) => {
+        try {
+          return {
+            address,
+            rewards: await getUserRewards(address),
+          }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          console.warn(`[leaderboard-earners] skipped ${address}: ${message}`)
+          return null
+        }
+      })).filter((entry) => entry !== null)
 
-    return {
-      earners,
-      pagination: { page: 1, limit, total: earners.length, pages: 1 },
-    }
+      const earners = rewards
+          .map(({ address, rewards }) => ({
+            address,
+            unforged: rewards.pendingLOOT.unforged,
+            unforgedFormatted: rewards.pendingLOOT.unforgedFormatted,
+            gross: rewards.pendingLOOT.gross,
+            grossFormatted: rewards.pendingLOOT.grossFormatted,
+          }))
+          .filter((item) => BigInt(item.unforged) > 0n)
+          .sort((a, b) => (BigInt(b.unforged) > BigInt(a.unforged) ? 1 : -1))
+          .slice(0, limit)
+
+      return {
+        earners,
+        pagination: { page: 1, limit, total: earners.length, pages: 1 },
+      }
+    })
   }, {
     staleWhileRevalidate: true,
     maxStaleMs: HEAVY_CACHE_MAX_STALE_MS,
