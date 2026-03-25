@@ -623,13 +623,13 @@ async function buildQuickChartImage(rawCandles: OhlcvPoint[], requestedWindow: s
             padding: 12,
           },
         },
-        y: {
+        yPrice: {
           position: 'right',
           min: y.min,
           max: y.max,
           grid: { color: 'rgba(123, 142, 184, 0.16)' },
           ticks: {
-            color: '#d2def4',
+            color: '#ffffff',
             callback: `function(value){
               const n = Number(value);
               if (!Number.isFinite(n)) return '';
@@ -640,11 +640,14 @@ async function buildQuickChartImage(rawCandles: OhlcvPoint[], requestedWindow: s
             font: { size: 10 },
           },
         },
-        volume: {
+        yVolume: {
           position: 'left',
           beginAtZero: true,
           max: maxVolume * 4,
           display: false,
+          grid: { display: false },
+          ticks: { display: false },
+          border: { display: false },
         },
       },
     },
