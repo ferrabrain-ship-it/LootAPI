@@ -471,6 +471,9 @@ async function buildQuickChartImage(rawCandles: OhlcvPoint[], requestedWindow: s
 
   const y = deriveYBounds(candles)
   const labels = candles.map((entry) => formatAxisTs(entry.timestampSec, requestedWindow))
+  const rightPaddingCandles = 6
+  const paddedLabels = [...labels, ...Array.from({ length: rightPaddingCandles }, () => '')]
+  const lastRealLabelIndex = labels.length - 1
   const xTickStep = Math.max(1, Math.floor(labels.length / 7))
   const yPrecision = getPriceTickPrecision(candles)
   const emaPeriod = requestedWindow === '15m' ? 21 : requestedWindow === '1h' ? 21 : 14
@@ -520,7 +523,7 @@ async function buildQuickChartImage(rawCandles: OhlcvPoint[], requestedWindow: s
       },
     ],
     data: {
-      labels,
+      labels: paddedLabels,
       datasets: [
         {
           label: 'Price',
@@ -563,7 +566,7 @@ async function buildQuickChartImage(rawCandles: OhlcvPoint[], requestedWindow: s
           label: 'Last',
           data: [
             { x: 1, y: lastClose },
-            { x: candles.length, y: lastClose },
+            { x: candles.length + rightPaddingCandles, y: lastClose },
           ],
           parsing: false,
           yAxisID: 'yPrice',
@@ -616,7 +619,8 @@ async function buildQuickChartImage(rawCandles: OhlcvPoint[], requestedWindow: s
             callback: `function(value){
               const idx = Number(value);
               if (!Number.isFinite(idx)) return this.getLabelForValue(value);
-              if (idx % ${xTickStep} !== 0 && idx !== ${labels.length - 1}) return '';
+              if (idx > ${lastRealLabelIndex}) return '';
+              if (idx % ${xTickStep} !== 0 && idx !== ${lastRealLabelIndex}) return '';
               return this.getLabelForValue(idx);
             }`,
             font: { size: 11, weight: '600' },
