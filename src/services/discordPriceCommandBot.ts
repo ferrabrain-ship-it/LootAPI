@@ -344,6 +344,38 @@ function getPriceTickPrecision(candles: OhlcvPoint[]) {
   return 6
 }
 
+function pickCandlesForRender(candles: OhlcvPoint[], requestedWindow: string) {
+  if (candles.length <= 90) return candles
+
+  const window = requestedWindow.toLowerCase()
+  const targetCount =
+    window === '15m'
+      ? 160
+      : window === '1h'
+        ? 120
+        : window === '4h'
+          ? 100
+          : 90
+
+  const clampedTarget = Math.max(60, Math.min(targetCount, candles.length))
+  return candles.slice(-clampedTarget)
+}
+
+function buildEmaSeries(candles: OhlcvPoint[], period: number) {
+  if (!candles.length) return [] as Array<{ x: number; y: number }>
+  const alpha = 2 / (period + 1)
+  const series: Array<{ x: number; y: number }> = []
+  let ema = candles[0].close
+
+  for (let index = 0; index < candles.length; index += 1) {
+    const close = candles[index].close
+    ema = index === 0 ? close : (close * alpha) + (ema * (1 - alpha))
+    series.push({ x: index + 1, y: ema })
+  }
+
+  return series
+}
+
 function deriveYBounds(candles: OhlcvPoint[]) {
   const focusWindow = Math.min(candles.length, 72)
   const focusCandles = candles.slice(-focusWindow)
@@ -367,11 +399,20 @@ function deriveYBounds(candles: OhlcvPoint[]) {
   }
 }
 
-async function buildQuickChartImage(candles: OhlcvPoint[], requestedWindow: string) {
+async function buildQuickChartImage(rawCandles: OhlcvPoint[], requestedWindow: string) {
+  const candles = pickCandlesForRender(rawCandles, requestedWindow)
+  if (candles.length < 2) {
+    throw new Error('Not enough candles to render chart')
+  }
+
   const y = deriveYBounds(candles)
   const labels = candles.map((entry) => formatAxisTs(entry.timestampSec, requestedWindow))
   const xTickStep = Math.max(1, Math.floor(labels.length / 7))
   const yPrecision = getPriceTickPrecision(candles)
+  const emaPeriod = requestedWindow === '15m' ? 21 : requestedWindow === '1h' ? 21 : 14
+  const emaSeries = buildEmaSeries(candles, emaPeriod)
+  const lastClose = candles[candles.length - 1]?.close ?? 0
+  const maxVolume = Math.max(1, ...candles.map((entry) => entry.volume))
   const candleData = candles.map((entry, index) => ({
     x: index + 1,
     o: entry.open,
@@ -384,6 +425,9 @@ async function buildQuickChartImage(candles: OhlcvPoint[], requestedWindow: stri
     x: index + 1,
     y: entry.volume,
   }))
+  const volumeColors = candles.map((entry) =>
+    entry.close >= entry.open ? 'rgba(53, 212, 127, 0.26)' : 'rgba(255, 107, 107, 0.24)'
+  )
 
   const chart = {
     type: 'candlestick',
@@ -391,7 +435,7 @@ async function buildQuickChartImage(candles: OhlcvPoint[], requestedWindow: stri
       labels,
       datasets: [
         {
-          label: 'LOOT / USD',
+          label: 'Price',
           data: candleData,
           color: {
             up: '#35d47f',
@@ -400,32 +444,67 @@ async function buildQuickChartImage(candles: OhlcvPoint[], requestedWindow: stri
           },
           borderColor: '#22304f',
           borderWidth: 1,
+          order: 3,
         },
         {
           type: 'bar',
           label: 'Volume',
           data: volumeData,
           yAxisID: 'volume',
-          backgroundColor: 'rgba(88, 129, 220, 0.22)',
+          backgroundColor: volumeColors,
           borderWidth: 0,
           barPercentage: 1.0,
           categoryPercentage: 0.95,
+          order: 1,
+        },
+        {
+          type: 'line',
+          label: `EMA ${emaPeriod}`,
+          data: emaSeries,
+          parsing: false,
+          yAxisID: 'y',
+          borderColor: '#4da3ff',
+          borderWidth: 1.6,
+          pointRadius: 0,
+          tension: 0.18,
+          order: 4,
+        },
+        {
+          type: 'line',
+          label: 'Last',
+          data: [
+            { x: 1, y: lastClose },
+            { x: candles.length, y: lastClose },
+          ],
+          parsing: false,
+          yAxisID: 'y',
+          borderColor: '#f0b90b',
+          borderWidth: 1.2,
+          borderDash: [6, 5],
+          pointRadius: 0,
+          tension: 0,
+          order: 2,
         },
       ],
     },
     options: {
+      animation: false,
+      interaction: {
+        mode: 'index',
+        intersect: false,
+      },
       plugins: {
         legend: { display: false },
         title: {
           display: true,
-          text: `LOOT / USD • ${requestedWindow.toUpperCase()} • Base`,
+          text: `LOOT / USD • ${requestedWindow.toUpperCase()} • TV-style`,
           color: '#f5f7fb',
-          font: { size: 22, weight: 'bold' },
-          padding: { top: 12, bottom: 12 },
+          font: { size: 21, weight: 'bold' },
+          padding: { top: 10, bottom: 10 },
         },
       },
       layout: {
-        padding: { left: 12, right: 14, top: 10, bottom: 8 },
+        padding: { left: 12, right: 14, top: 8, bottom: 8 },
       },
       scales: {
         x: {
@@ -449,7 +528,12 @@ async function buildQuickChartImage(candles: OhlcvPoint[], requestedWindow: stri
           grid: { color: 'rgba(123, 142, 184, 0.16)' },
           ticks: {
             color: '#d2def4',
-            callback: `function(value){ return Number(value).toFixed(${yPrecision}); }`,
+            callback: `function(value){
+              const n = Number(value);
+              if (!Number.isFinite(n)) return '';
+              if (Math.abs(n) >= 1000) return n.toLocaleString('en-US', { maximumFractionDigits: 2 });
+              return n.toFixed(${yPrecision});
+            }`,
             maxTicksLimit: 7,
             font: { size: 10 },
           },
@@ -457,6 +541,7 @@ async function buildQuickChartImage(candles: OhlcvPoint[], requestedWindow: stri
         volume: {
           position: 'left',
           beginAtZero: true,
+          max: maxVolume * 4,
           display: false,
         },
       },
@@ -470,8 +555,8 @@ async function buildQuickChartImage(candles: OhlcvPoint[], requestedWindow: stri
     },
     body: JSON.stringify({
       version: '4',
-      width: 1320,
-      height: 820,
+      width: 1400,
+      height: 860,
       devicePixelRatio: 2,
       format: 'png',
       backgroundColor: '#0a1020',
@@ -683,7 +768,7 @@ async function respondPrice(message: Message, requestedWindow: string, logger: L
       renderSource === 'dexscreener'
         ? 'DexScreener pair + screenshot chart.'
         : renderSource === 'quickchart'
-          ? 'DexScreener pair + live candle chart.'
+          ? 'DexScreener pair + TradingView-style live candle chart.'
           : 'DexScreener pair overview.'
     )
     .addFields(
