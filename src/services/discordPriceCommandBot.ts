@@ -461,6 +461,7 @@ async function buildQuickChartImage(rawCandles: OhlcvPoint[], requestedWindow: s
         {
           label: 'Price',
           data: candleData,
+          yAxisID: 'yPrice',
           color: {
             up: '#35d47f',
             down: '#ff6b6b',
@@ -474,7 +475,7 @@ async function buildQuickChartImage(rawCandles: OhlcvPoint[], requestedWindow: s
           type: 'bar',
           label: 'Volume',
           data: volumeData,
-          yAxisID: 'volume',
+          yAxisID: 'yVolume',
           backgroundColor: volumeColors,
           borderWidth: 0,
           barPercentage: 1.0,
@@ -486,7 +487,7 @@ async function buildQuickChartImage(rawCandles: OhlcvPoint[], requestedWindow: s
           label: `EMA ${emaPeriod}`,
           data: emaSeries,
           parsing: false,
-          yAxisID: 'y',
+          yAxisID: 'yPrice',
           borderColor: '#4da3ff',
           borderWidth: 1.6,
           pointRadius: 0,
@@ -501,7 +502,7 @@ async function buildQuickChartImage(rawCandles: OhlcvPoint[], requestedWindow: s
             { x: candles.length, y: lastClose },
           ],
           parsing: false,
-          yAxisID: 'y',
+          yAxisID: 'yPrice',
           borderColor: '#f0b90b',
           borderWidth: 1.2,
           borderDash: [6, 5],
@@ -528,7 +529,7 @@ async function buildQuickChartImage(rawCandles: OhlcvPoint[], requestedWindow: s
         },
       },
       layout: {
-        padding: { left: 12, right: 14, top: 8, bottom: 8 },
+        padding: { left: 12, right: 14, top: 8, bottom: 34 },
       },
       scales: {
         x: {
@@ -544,15 +545,18 @@ async function buildQuickChartImage(rawCandles: OhlcvPoint[], requestedWindow: s
           },
           ticks: {
             color: '#96a8cb',
-            maxTicksLimit: 8,
+            autoSkip: false,
+            maxTicksLimit: 10,
             minRotation: 0,
             maxRotation: 0,
-            callback: `function(value, index){
-              if (index % ${xTickStep} !== 0 && index !== ${labels.length - 1}) return '';
-              return this.getLabelForValue(value);
+            callback: `function(value){
+              const idx = Number(value);
+              if (!Number.isFinite(idx)) return this.getLabelForValue(value);
+              if (idx % ${xTickStep} !== 0 && idx !== ${labels.length - 1}) return '';
+              return this.getLabelForValue(idx);
             }`,
             font: { size: 11, weight: '600' },
-            padding: 10,
+            padding: 12,
           },
         },
         y: {
