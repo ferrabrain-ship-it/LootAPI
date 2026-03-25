@@ -248,7 +248,7 @@ async function enrichDeploymentLog(
   lootPriceNativeEth: number,
   roundCache: Map<bigint, Promise<Awaited<ReturnType<typeof getRound>>>>,
   minerCache: Map<bigint, Promise<Awaited<ReturnType<typeof getRoundMiners>>>>
-): Promise<EnrichedAgentRound> {
+): Promise<EnrichedAgentRound | null> {
   const roundId = toBigInt(log.args.roundId)
   const loadRound = () => {
     const cached = roundCache.get(roundId)
@@ -266,6 +266,10 @@ async function enrichDeploymentLog(
   }
 
   const [round, miners] = await Promise.all([loadRound(), loadMiners()])
+
+  if (!round) {
+    return null
+  }
   const blockMask = toBigInt(log.args.blockMask)
   const selectedBlocks = decodeBlockMask(blockMask)
   const totalAmountWei = toBigInt(log.args.totalAmount)
@@ -801,9 +805,14 @@ async function syncAgentWalletStats(walletAddress: Address, logger: Logger = con
 
     const roundCache = new Map<bigint, Promise<Awaited<ReturnType<typeof getRound>>>>()
     const minerCache = new Map<bigint, Promise<Awaited<ReturnType<typeof getRoundMiners>>>>()
-    const enrichedNew = await mapWithConcurrency(newLogs, AGENT_STATS_SYNC_CONCURRENCY, (log) =>
+    const enrichedRaw = await mapWithConcurrency(newLogs, AGENT_STATS_SYNC_CONCURRENCY, (log) =>
       enrichDeploymentLog(address, log, lootPriceNativeEth, roundCache, minerCache)
     )
+    const skippedCount = enrichedRaw.filter((entry) => entry === null).length
+    if (skippedCount > 0) {
+      logger.warn(`[agent-stats] skipped ${skippedCount} round(s) for ${address} due to unavailable round data`)
+    }
+    const enrichedNew = enrichedRaw.filter((entry): entry is EnrichedAgentRound => entry !== null)
 
     const existingTotalDeployedWei = existing ? parseNumericToWei(existing.total_deployed_eth) : 0n
     const existingTotalRewardsWei = existing ? parseNumericToWei(existing.total_rewards_eth) : 0n
