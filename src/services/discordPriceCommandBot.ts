@@ -40,6 +40,15 @@ type Pair = {
   }
 }
 
+const DEXSCREENER_TOKEN_URL = `https://api.dexscreener.com/latest/dex/tokens/${CONTRACTS.loot}`
+const DEXSCREENER_FALLBACK_URL = 'https://dexscreener.com/base'
+const DEXSCREENER_CACHE_TTL_MS = 10 * 60 * 1000
+const DEXSCREENER_REQUEST_TIMEOUT_MS = 7_000
+const DEXSCREENER_MAX_ATTEMPTS = 3
+
+let lastKnownPair: Pair | null = null
+let lastKnownPairAt = 0
+
 const SUPPORTED_WINDOWS = new Set([
   '15m',
   '1h',
@@ -169,6 +178,20 @@ function formatUsd(value: number) {
   return `$${value.toFixed(6)}`
 }
 
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function isValidHttpUrl(value: string | undefined | null) {
+  if (!value) return false
+  try {
+    const parsed = new URL(value)
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:'
+  } catch {
+    return false
+  }
+}
+
 function parseCommandWindow(content: string) {
   const trimmed = content.trim().toLowerCase()
   const tokens = trimmed.split(/\s+/).filter(Boolean)
@@ -237,24 +260,65 @@ function buildDexScreenerEmbedUrl(pairUrl: string, requestedWindow: string) {
   return parsed.toString()
 }
 
-async function getBestLootPair() {
-  const response = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${CONTRACTS.loot}`, {
-    cache: 'no-store',
-  })
+async function getBestLootPair(logger: Logger) {
+  let lastError: string | null = null
 
-  if (!response.ok) {
-    throw new Error(`DexScreener ${response.status}`)
+  for (let attempt = 1; attempt <= DEXSCREENER_MAX_ATTEMPTS; attempt += 1) {
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), DEXSCREENER_REQUEST_TIMEOUT_MS)
+
+    try {
+      const response = await fetch(DEXSCREENER_TOKEN_URL, {
+        cache: 'no-store',
+        signal: controller.signal,
+      })
+
+      if (!response.ok) {
+        throw new Error(`DexScreener ${response.status}`)
+      }
+
+      const data = await response.json() as { pairs?: Pair[] }
+      const pairs = data.pairs ?? []
+      if (!pairs.length) {
+        throw new Error('No LOOT pair available on DexScreener')
+      }
+
+      const best = [...pairs].sort(
+        (left, right) => numeric(right.liquidity?.usd) - numeric(left.liquidity?.usd)
+      )[0]
+      lastKnownPair = best
+      lastKnownPairAt = Date.now()
+      return best
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error)
+      if (attempt < DEXSCREENER_MAX_ATTEMPTS) {
+        await sleep(250 * attempt)
+      }
+    } finally {
+      clearTimeout(timeout)
+    }
   }
 
-  const data = await response.json() as { pairs?: Pair[] }
-  const pairs = data.pairs ?? []
-  if (!pairs.length) {
-    throw new Error('No LOOT pair available on DexScreener')
+  const hasFreshCache = lastKnownPair && (Date.now() - lastKnownPairAt) <= DEXSCREENER_CACHE_TTL_MS
+  if (hasFreshCache && lastKnownPair) {
+    logger.warn(
+      { error: lastError, cachedAt: new Date(lastKnownPairAt).toISOString() },
+      '[discord-price-command-bot] dexscreener unavailable; using cached pair'
+    )
+    return lastKnownPair
   }
 
-  return [...pairs].sort(
-    (left, right) => numeric(right.liquidity?.usd) - numeric(left.liquidity?.usd)
-  )[0]
+  logger.warn(
+    { error: lastError },
+    '[discord-price-command-bot] dexscreener unavailable and no cache; using fallback pair'
+  )
+  return {
+    url: DEXSCREENER_FALLBACK_URL,
+    priceUsd: '0',
+    priceChange: { h1: 0, h6: 0, h24: 0 },
+    volume: { h1: 0, h6: 0, h24: 0 },
+    liquidity: { usd: 0 },
+  } satisfies Pair
 }
 
 async function getOhlcvFromGecko(pairAddress: string, requestedWindow: string) {
@@ -744,7 +808,7 @@ async function buildDexScreenerChartImage(pairUrl: string, requestedWindow: stri
 }
 
 async function respondPrice(message: Message, requestedWindow: string, logger: Logger) {
-  const pair = await getBestLootPair()
+  const pair = await getBestLootPair(logger)
 
   const priceUsd = numeric(pair.priceUsd)
   const change24h = numeric(pair.priceChange?.h24)
@@ -754,7 +818,9 @@ async function respondPrice(message: Message, requestedWindow: string, logger: L
   const liqUsd = numeric(pair.liquidity?.usd)
 
   const title = `LOOT / USD • ${requestedWindow.toUpperCase()}`
-  const openUrl = pair.url ? decoratePairUrl(pair.url, requestedWindow) : 'https://dexscreener.com/base'
+  const openUrl = isValidHttpUrl(pair.url)
+    ? decoratePairUrl(pair.url as string, requestedWindow)
+    : DEXSCREENER_FALLBACK_URL
   let chartAttachment: AttachmentBuilder | null = null
   let renderSource: 'dexscreener' | 'quickchart' | 'openGraph' = 'openGraph'
   let renderNote: string | null = null
@@ -824,8 +890,8 @@ async function respondPrice(message: Message, requestedWindow: string, logger: L
 
   if (chartAttachment) {
     embed.setImage('attachment://loot-chart.png')
-  } else if (pair.info?.openGraph) {
-    embed.setImage(pair.info.openGraph)
+  } else if (isValidHttpUrl(pair.info?.openGraph)) {
+    embed.setImage(pair.info?.openGraph as string)
   }
 
   const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
