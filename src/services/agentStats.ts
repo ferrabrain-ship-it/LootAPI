@@ -248,7 +248,7 @@ async function enrichDeploymentLog(
   lootPriceNativeEth: number,
   roundCache: Map<bigint, Promise<Awaited<ReturnType<typeof getRound>>>>,
   minerCache: Map<bigint, Promise<Awaited<ReturnType<typeof getRoundMiners>>>>
-): Promise<EnrichedAgentRound> {
+): Promise<EnrichedAgentRound | null> {
   const roundId = toBigInt(log.args.roundId)
   const loadRound = () => {
     const cached = roundCache.get(roundId)
@@ -266,6 +266,16 @@ async function enrichDeploymentLog(
   }
 
   const [round, miners] = await Promise.all([loadRound(), loadMiners()])
+  if (!round || typeof (round as { winningBlock?: unknown }).winningBlock !== 'number') {
+    return null
+  }
+
+  const winningBlock = Number((round as { winningBlock: number }).winningBlock)
+  if (!Number.isFinite(winningBlock)) {
+    return null
+  }
+
+  const lootpotAmount = Number((round as { lootpotAmount?: string | number | bigint }).lootpotAmount ?? 0)
   const blockMask = toBigInt(log.args.blockMask)
   const selectedBlocks = decodeBlockMask(blockMask)
   const totalAmountWei = toBigInt(log.args.totalAmount)
@@ -278,12 +288,12 @@ async function enrichDeploymentLog(
   const lootValueEth = lootEarned * lootPriceNativeEth
   const pnlEth = rewardsEth - deployedEth
   const truePnlEth = pnlEth + lootValueEth
-  const wonWinningBlock = selectedBlocks.includes(round.winningBlock)
-  const outcome = Number(round.lootpotAmount) > 0 ? 'Lootpot' : wonWinningBlock ? 'Win' : 'Miss'
+  const wonWinningBlock = selectedBlocks.includes(winningBlock)
+  const outcome = lootpotAmount > 0 ? 'Lootpot' : wonWinningBlock ? 'Win' : 'Miss'
 
   return {
     roundId: Number(roundId),
-    blockNumber: round.winningBlock + 1,
+    blockNumber: winningBlock + 1,
     blocksCovered: selectedBlocks.length,
     deployedEth,
     rewardsEth,
@@ -294,7 +304,7 @@ async function enrichDeploymentLog(
     pnlPct: deployedEth > 0 ? (truePnlEth / deployedEth) * 100 : 0,
     outcome,
     mode: outcome === 'Lootpot' ? 'Lootpot hit' : wonWinningBlock ? 'Winning entry' : 'No win',
-    roundTimestamp: round.settledAt ?? null,
+    roundTimestamp: (round as { settledAt?: string | null }).settledAt ?? null,
     totalAmountWei,
     rewardsEthWei,
     lootEarnedWei,
@@ -640,6 +650,34 @@ async function refreshCurrentValueFields(client: PoolClient, walletAddress: Addr
   )
 }
 
+async function updateTreasurySnapshotFields(
+  client: PoolClient,
+  walletAddress: Address,
+  treasurySnapshot: TreasurySyncSnapshot
+) {
+  await client.query(
+    `
+      update agent_wallet_stats
+      set
+        total_burned_loot = $2,
+        total_rebalanced_loot = $3,
+        total_burn_events = $4,
+        total_rebalance_events = $5,
+        last_treasury_processed_block = $6,
+        updated_at = now()
+      where wallet_address = $1
+    `,
+    [
+      walletAddress.toLowerCase(),
+      formatEther(treasurySnapshot.burnedLootWei),
+      formatEther(treasurySnapshot.rebalancedLootWei),
+      treasurySnapshot.burnEvents,
+      treasurySnapshot.rebalanceEvents,
+      Number(treasurySnapshot.lastProcessedBlock),
+    ]
+  )
+}
+
 async function replaceRecentRows(client: PoolClient, walletAddress: Address, rounds: EnrichedAgentRound[]) {
   const normalizedWallet = walletAddress.toLowerCase()
 
@@ -730,7 +768,14 @@ async function syncAgentWalletStats(walletAddress: Address, logger: Logger = con
       getLootPriceNativeEth(),
     ])
 
-    const walletLogs = allLogs.filter((log) => safeAddressEq(log.args.user, address))
+    const walletLogs = allLogs
+      .filter((log) => safeAddressEq(log.args.user, address))
+      .sort((left, right) => {
+        if (left.blockNumber === right.blockNumber) {
+          return Number(left.logIndex) - Number(right.logIndex)
+        }
+        return left.blockNumber > right.blockNumber ? 1 : -1
+      })
     const existing = await loadStatsRow(client, address)
     const treasurySnapshot = await syncAgentTreasuryEvents(client, address, existing)
 
@@ -775,35 +820,49 @@ async function syncAgentWalletStats(walletAddress: Address, logger: Logger = con
 
     if (newLogs.length === 0 && existing) {
       await refreshCurrentValueFields(client, address, lootPriceNativeEth)
-      await client.query(
-        `
-          update agent_wallet_stats
-          set
-            total_burned_loot = $2,
-            total_rebalanced_loot = $3,
-            total_burn_events = $4,
-            total_rebalance_events = $5,
-            last_treasury_processed_block = $6,
-            updated_at = now()
-          where wallet_address = $1
-        `,
-        [
-          address.toLowerCase(),
-          formatEther(treasurySnapshot.burnedLootWei),
-          formatEther(treasurySnapshot.rebalancedLootWei),
-          treasurySnapshot.burnEvents,
-          treasurySnapshot.rebalanceEvents,
-          Number(treasurySnapshot.lastProcessedBlock),
-        ]
-      )
+      await updateTreasurySnapshotFields(client, address, treasurySnapshot)
       return
     }
 
+    const orderedNewLogs = [...newLogs].sort((left, right) => {
+      const leftRoundId = toBigInt(left.args.roundId)
+      const rightRoundId = toBigInt(right.args.roundId)
+      if (leftRoundId === rightRoundId) {
+        if (left.blockNumber === right.blockNumber) {
+          return Number(left.logIndex) - Number(right.logIndex)
+        }
+        return left.blockNumber > right.blockNumber ? 1 : -1
+      }
+      return leftRoundId > rightRoundId ? 1 : -1
+    })
+
     const roundCache = new Map<bigint, Promise<Awaited<ReturnType<typeof getRound>>>>()
     const minerCache = new Map<bigint, Promise<Awaited<ReturnType<typeof getRoundMiners>>>>()
-    const enrichedNew = await mapWithConcurrency(newLogs, AGENT_STATS_SYNC_CONCURRENCY, (log) =>
-      enrichDeploymentLog(address, log, lootPriceNativeEth, roundCache, minerCache)
-    )
+    const enrichedNew: EnrichedAgentRound[] = []
+    let deferredRoundId: bigint | null = null
+
+    for (const log of orderedNewLogs) {
+      const enriched = await enrichDeploymentLog(address, log, lootPriceNativeEth, roundCache, minerCache)
+      if (!enriched) {
+        deferredRoundId = toBigInt(log.args.roundId)
+        break
+      }
+      enrichedNew.push(enriched)
+    }
+
+    if (deferredRoundId !== null) {
+      logger.info(
+        `[agent-stats] deferred wallet ${address}: round ${deferredRoundId.toString()} is not settled/indexed yet; retrying next cycle`
+      )
+    }
+
+    if (enrichedNew.length === 0) {
+      if (existing) {
+        await refreshCurrentValueFields(client, address, lootPriceNativeEth)
+        await updateTreasurySnapshotFields(client, address, treasurySnapshot)
+      }
+      return
+    }
 
     const existingTotalDeployedWei = existing ? parseNumericToWei(existing.total_deployed_eth) : 0n
     const existingTotalRewardsWei = existing ? parseNumericToWei(existing.total_rewards_eth) : 0n
@@ -831,8 +890,8 @@ async function syncAgentWalletStats(walletAddress: Address, logger: Logger = con
       existing ? numericToNumber(existing.worst_round_eth) : Number.POSITIVE_INFINITY,
       ...enrichedNew.map((entry) => entry.truePnlEth)
     )
-    const lastRound = walletLogs[walletLogs.length - 1]
-    const nextLastProcessedRound = Number(toBigInt(lastRound.args.roundId))
+    const lastProcessedLog = orderedNewLogs[enrichedNew.length - 1]
+    const nextLastProcessedRound = Number(toBigInt(lastProcessedLog.args.roundId))
     const latestActivity = enrichedNew.at(-1)?.roundTimestamp
       ?? toIsoString(existing?.last_active_at)
 
@@ -965,7 +1024,10 @@ async function syncAgentWalletStats(walletAddress: Address, logger: Logger = con
       .slice(0, AGENT_STATS_RECENT_STORE_LIMIT)
 
     await replaceRecentRows(client, address, nextRecent)
-    logger.info(`[agent-stats] synced ${address} (${enrichedNew.length} new rounds)`)
+    const deferredCount = orderedNewLogs.length - enrichedNew.length
+    logger.info(
+      `[agent-stats] synced ${address} (${enrichedNew.length} new rounds${deferredCount > 0 ? `, ${deferredCount} deferred` : ''})`
+    )
   } finally {
     client.release()
   }
