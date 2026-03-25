@@ -305,10 +305,17 @@ async function getOhlcvFromGecko(pairAddress: string, requestedWindow: string) {
   return parsed
 }
 
-function formatAxisTs(timestampSec: number) {
+function formatAxisTs(timestampSec: number, requestedWindow: string) {
+  const config = WINDOW_CONFIG[requestedWindow]
   const date = new Date(timestampSec * 1000)
+  if (config?.timeframe === 'day') {
+    return new Intl.DateTimeFormat('en-US', {
+      month: 'short',
+      day: 'numeric',
+    }).format(date)
+  }
+
   return new Intl.DateTimeFormat('en-US', {
-    month: 'short',
     day: 'numeric',
     hour: '2-digit',
     minute: '2-digit',
@@ -328,36 +335,43 @@ function percentile(values: number[], p: number) {
   return sorted[lo] * (1 - weight) + sorted[hi] * weight
 }
 
+function getPriceTickPrecision(candles: OhlcvPoint[]) {
+  const latest = candles[candles.length - 1]?.close ?? 0
+  if (latest >= 1000) return 2
+  if (latest >= 100) return 3
+  if (latest >= 1) return 4
+  if (latest >= 0.1) return 5
+  return 6
+}
+
 function deriveYBounds(candles: OhlcvPoint[]) {
-  const highs = candles.map((entry) => entry.high).filter(Number.isFinite)
-  const lows = candles.map((entry) => entry.low).filter(Number.isFinite)
+  const focusWindow = Math.min(candles.length, 72)
+  const focusCandles = candles.slice(-focusWindow)
+  const highs = focusCandles.map((entry) => entry.high).filter(Number.isFinite)
+  const lows = focusCandles.map((entry) => entry.low).filter(Number.isFinite)
 
   if (!highs.length || !lows.length) {
     return { min: 0, max: 1 }
   }
 
-  const absoluteMax = Math.max(...highs)
-  const absoluteMin = Math.min(...lows)
-  const p98 = percentile(highs, 0.98)
   const p95 = percentile(highs, 0.95)
-  const p02 = percentile(lows, 0.02)
-
-  // Trim extreme listing wick/outlier so recent action remains readable.
-  const effectiveMax = absoluteMax > p95 * 1.8 ? p98 : absoluteMax
-  const latest = candles[candles.length - 1]
-  const max = Math.max(effectiveMax, latest?.high ?? effectiveMax)
-  const minBase = Math.min(p02, latest?.low ?? p02, absoluteMin)
+  const p05 = percentile(lows, 0.05)
+  const latest = focusCandles[focusCandles.length - 1]
+  const max = Math.max(p95, latest?.high ?? p95)
+  const minBase = Math.min(p05, latest?.low ?? p05)
   const span = Math.max(max - minBase, max * 0.08, 1e-8)
 
   return {
-    min: Math.max(0, minBase - span * 0.08),
-    max: max + span * 0.12,
+    min: Math.max(0, minBase - span * 0.1),
+    max: max + span * 0.14,
   }
 }
 
 async function buildQuickChartImage(candles: OhlcvPoint[], requestedWindow: string) {
   const y = deriveYBounds(candles)
-  const labels = candles.map((entry) => formatAxisTs(entry.timestampSec))
+  const labels = candles.map((entry) => formatAxisTs(entry.timestampSec, requestedWindow))
+  const xTickStep = Math.max(1, Math.floor(labels.length / 7))
+  const yPrecision = getPriceTickPrecision(candles)
   const candleData = candles.map((entry, index) => ({
     x: index + 1,
     o: entry.open,
@@ -380,18 +394,19 @@ async function buildQuickChartImage(candles: OhlcvPoint[], requestedWindow: stri
           label: 'LOOT / USD',
           data: candleData,
           color: {
-            up: '#2bd67b',
-            down: '#ff5d5d',
-            unchanged: '#9aa4b2',
+            up: '#35d47f',
+            down: '#ff6b6b',
+            unchanged: '#8ea3c6',
           },
-          borderColor: '#2b3345',
+          borderColor: '#22304f',
+          borderWidth: 1,
         },
         {
           type: 'bar',
           label: 'Volume',
           data: volumeData,
           yAxisID: 'volume',
-          backgroundColor: 'rgba(72, 114, 189, 0.35)',
+          backgroundColor: 'rgba(88, 129, 220, 0.22)',
           borderWidth: 0,
           barPercentage: 1.0,
           categoryPercentage: 0.95,
@@ -403,39 +418,45 @@ async function buildQuickChartImage(candles: OhlcvPoint[], requestedWindow: stri
         legend: { display: false },
         title: {
           display: true,
-          text: `LOOT / USD • ${requestedWindow.toUpperCase()} • Uniswap`,
+          text: `LOOT / USD • ${requestedWindow.toUpperCase()} • Base`,
           color: '#f5f7fb',
-          font: { size: 20, weight: 'bold' },
-          padding: { top: 10, bottom: 16 },
+          font: { size: 22, weight: 'bold' },
+          padding: { top: 12, bottom: 12 },
         },
       },
       layout: {
-        padding: { left: 10, right: 10, top: 6, bottom: 6 },
+        padding: { left: 12, right: 14, top: 10, bottom: 8 },
       },
       scales: {
         x: {
-          grid: { color: 'rgba(123, 142, 184, 0.22)' },
+          grid: { color: 'rgba(123, 142, 184, 0.14)' },
           ticks: {
-            color: '#9fb0cf',
-          maxTicksLimit: 10,
-          minRotation: 0,
-          maxRotation: 0,
+            color: '#96a8cb',
+            maxTicksLimit: 8,
+            minRotation: 0,
+            maxRotation: 0,
+            callback: `function(value, index){
+              if (index % ${xTickStep} !== 0 && index !== ${labels.length - 1}) return '';
+              return this.getLabelForValue(value);
+            }`,
+            font: { size: 10 },
+          },
         },
-      },
-      y: {
-        position: 'right',
-        min: y.min,
-        max: y.max,
-        grid: { color: 'rgba(123, 142, 184, 0.22)' },
-        ticks: {
-          color: '#c6d2ea',
-          callback: 'function(value){ return Number(value).toFixed(6); }',
-          maxTicksLimit: 8,
+        y: {
+          position: 'right',
+          min: y.min,
+          max: y.max,
+          grid: { color: 'rgba(123, 142, 184, 0.16)' },
+          ticks: {
+            color: '#d2def4',
+            callback: `function(value){ return Number(value).toFixed(${yPrecision}); }`,
+            maxTicksLimit: 7,
+            font: { size: 10 },
+          },
         },
-      },
-      volume: {
-        position: 'left',
-        beginAtZero: true,
+        volume: {
+          position: 'left',
+          beginAtZero: true,
           display: false,
         },
       },
@@ -449,8 +470,8 @@ async function buildQuickChartImage(candles: OhlcvPoint[], requestedWindow: stri
     },
     body: JSON.stringify({
       version: '4',
-      width: 1280,
-      height: 960,
+      width: 1320,
+      height: 820,
       devicePixelRatio: 2,
       format: 'png',
       backgroundColor: '#0a1020',
