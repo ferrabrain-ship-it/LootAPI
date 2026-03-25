@@ -431,6 +431,30 @@ async function buildQuickChartImage(rawCandles: OhlcvPoint[], requestedWindow: s
 
   const chart = {
     type: 'candlestick',
+    plugins: [
+      {
+        id: 'timeStrip',
+        beforeDraw: `function(chart){
+          const x = chart.scales && chart.scales.x;
+          const area = chart.chartArea;
+          if (!x || !area) return;
+          const ctx = chart.ctx;
+          const top = area.bottom + 1;
+          const bottom = x.bottom;
+          if (bottom <= top) return;
+          ctx.save();
+          ctx.fillStyle = 'rgba(8, 15, 31, 0.92)';
+          ctx.fillRect(area.left, top, area.right - area.left, bottom - top);
+          ctx.strokeStyle = 'rgba(123, 142, 184, 0.26)';
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(area.left, top);
+          ctx.lineTo(area.right, top);
+          ctx.stroke();
+          ctx.restore();
+        }`,
+      },
+    ],
     data: {
       labels,
       datasets: [
@@ -497,7 +521,7 @@ async function buildQuickChartImage(rawCandles: OhlcvPoint[], requestedWindow: s
         legend: { display: false },
         title: {
           display: true,
-          text: `LOOT / USD • ${requestedWindow.toUpperCase()} • TV-style`,
+          text: `LOOT / USD • ${requestedWindow.toUpperCase()}`,
           color: '#f5f7fb',
           font: { size: 21, weight: 'bold' },
           padding: { top: 10, bottom: 10 },
@@ -508,7 +532,16 @@ async function buildQuickChartImage(rawCandles: OhlcvPoint[], requestedWindow: s
       },
       scales: {
         x: {
-          grid: { color: 'rgba(123, 142, 184, 0.14)' },
+          offset: true,
+          grid: {
+            color: 'rgba(123, 142, 184, 0.14)',
+            drawOnChartArea: false,
+            drawTicks: false,
+          },
+          border: {
+            display: true,
+            color: 'rgba(123, 142, 184, 0.28)',
+          },
           ticks: {
             color: '#96a8cb',
             maxTicksLimit: 8,
@@ -518,7 +551,8 @@ async function buildQuickChartImage(rawCandles: OhlcvPoint[], requestedWindow: s
               if (index % ${xTickStep} !== 0 && index !== ${labels.length - 1}) return '';
               return this.getLabelForValue(value);
             }`,
-            font: { size: 10 },
+            font: { size: 11, weight: '600' },
+            padding: 10,
           },
         },
         y: {
@@ -768,7 +802,7 @@ async function respondPrice(message: Message, requestedWindow: string, logger: L
       renderSource === 'dexscreener'
         ? 'DexScreener pair + screenshot chart.'
         : renderSource === 'quickchart'
-          ? 'DexScreener pair + TradingView-style live candle chart.'
+          ? 'DexScreener pair + live candle chart.'
           : 'DexScreener pair overview.'
     )
     .addFields(
