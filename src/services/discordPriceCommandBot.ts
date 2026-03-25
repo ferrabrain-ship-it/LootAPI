@@ -823,7 +823,6 @@ async function respondPrice(message: Message, requestedWindow: string, logger: L
     : DEXSCREENER_FALLBACK_URL
   let chartAttachment: AttachmentBuilder | null = null
   let renderSource: 'dexscreener' | 'quickchart' | 'openGraph' = 'openGraph'
-  let renderNote: string | null = null
 
   if (env.discordPriceCommandRenderMode === 'dexscreener' && pair.url) {
     try {
@@ -832,7 +831,6 @@ async function respondPrice(message: Message, requestedWindow: string, logger: L
       renderSource = 'dexscreener'
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
-      renderNote = `dex fail: ${message}`.slice(0, 80)
       logger.warn(
         {
           requestedWindow,
@@ -884,7 +882,7 @@ async function respondPrice(message: Message, requestedWindow: string, logger: L
       { name: '24h Volume', value: formatUsd(vol24h), inline: true },
     )
     .setFooter({
-      text: `Requested by ${message.author.username} • render: ${renderSource}${renderNote ? ` • ${renderNote}` : ''}`,
+      text: `Requested by ${message.author.username}`,
     })
     .setTimestamp(new Date())
 
