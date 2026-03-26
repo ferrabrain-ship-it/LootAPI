@@ -646,6 +646,7 @@ export async function getIndexedLockSnapshot() {
       lockers: string
       total_notified: string
       protocol_weight: string
+      distributed_in_window: string
     }>(`
       with locked as (
         select user_address, coalesce(sum(amount_delta), 0) as locked_amount
@@ -660,16 +661,24 @@ export async function getIndexedLockSnapshot() {
         limit 1
       ),
       rewards as (
-        select coalesce(sum(amount), 0)::text as total_notified
+        select
+          coalesce(sum(amount), 0)::text as total_notified,
+          coalesce(
+            sum(distributed_amount) filter (
+              where block_timestamp >= now() - make_interval(days => $1::int)
+            ),
+            0
+          )::text as distributed_in_window
         from protocol_lock_reward_notified
       )
       select
         coalesce(sum(case when locked_amount > 0 then locked_amount else 0 end), 0)::text as protocol_locked,
         (count(*) filter (where locked_amount > 0))::text as lockers,
         (select total_notified from rewards),
-        coalesce((select protocol_weight from latest_weight), '0') as protocol_weight
+        coalesce((select protocol_weight from latest_weight), '0') as protocol_weight,
+        (select distributed_in_window from rewards)
       from locked
-    `)
+    `, [String(STAKING_APR_WINDOW_DAYS)])
 
     const row = result.rows[0]
     return {
@@ -680,6 +689,8 @@ export async function getIndexedLockSnapshot() {
       totalNotifiedFormatted: etherString(toBigInt(row.total_notified)),
       protocolWeight: row.protocol_weight,
       protocolWeightFormatted: etherString(toBigInt(row.protocol_weight)),
+      distributedInWindow: row.distributed_in_window,
+      distributedInWindowFormatted: etherString(toBigInt(row.distributed_in_window)),
     }
   })
 }

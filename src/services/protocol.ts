@@ -124,6 +124,7 @@ const MIN_LOG_BLOCK_RANGE = 1_000n
 const GLOBAL_LOG_CACHE_TTL_MS = 60_000
 const HEAVY_ROUTE_CACHE_TTL_MS = 120_000
 const STAKING_APR_WINDOW_DAYS = 7
+const LOCK_APR_WINDOW_DAYS = 7
 const LOG_FETCH_CONCURRENCY = 4
 const RECENT_SETTLED_LOOKBACK = 1_000n
 const RECENT_SETTLED_LIST_LOOKBACK = 5_000n
@@ -2410,23 +2411,31 @@ export async function getLockStats() {
         const indexed = await getIndexedLockSnapshot()
         if (!indexed) return null
 
-        const totalClaimedResult = await Promise.allSettled([
+        const [totalClaimedResult, price] = await Promise.all([
           withRpcRetries(() => publicClient.readContract({
             address: CONTRACTS.lockerRewards,
             abi: LOCKER_REWARDS_READ_ABI,
             functionName: 'totalClaimed',
-          }) as Promise<bigint>),
+          }) as Promise<bigint>).catch(() => 0n),
+          getLootPrice(),
         ])
-        const totalClaimed = totalClaimedResult[0]?.status === 'fulfilled' ? totalClaimedResult[0].value : 0n
+        const totalLocked = BigInt(indexed.protocolLocked)
+        const distributedInWindow = BigInt(indexed.distributedInWindow)
+        const lootPriceNative = Number(price.payload.loot.priceNative ?? 0)
+        const tvlEth = Number(formatEther(totalLocked)) * lootPriceNative
+        const apr = tvlEth > 0
+          ? (Number(formatEther(distributedInWindow)) * (365 / LOCK_APR_WINDOW_DAYS) / tvlEth) * 100
+          : 0
 
         return {
           ...indexed,
-          totalClaimed: totalClaimed.toString(),
-          totalClaimedFormatted: etherString(totalClaimed),
+          totalClaimed: totalClaimedResult.toString(),
+          totalClaimedFormatted: etherString(totalClaimedResult),
+          apr: apr.toFixed(2),
         }
       },
       async () => {
-        const [totalLockedResult, totalWeightResult, totalNotifiedResult, totalClaimedResult, snapshotResult] = await Promise.allSettled([
+        const [totalLockedResult, totalWeightResult, totalNotifiedResult, totalClaimedResult, snapshotResult, priceResult, rewardLogsResult] = await Promise.allSettled([
           withRpcRetries(() => publicClient.readContract({
             address: CONTRACTS.lootLocker,
             abi: LOOT_LOCKER_READ_ABI,
@@ -2448,6 +2457,8 @@ export async function getLockStats() {
             functionName: 'totalClaimed',
           }) as Promise<bigint>),
           getLockerSnapshot(),
+          getLootPrice(),
+          getRecentLockRewardNotifiedLogs(),
         ])
 
         const totalLocked = totalLockedResult.status === 'fulfilled' ? totalLockedResult.value : 0n
@@ -2457,8 +2468,24 @@ export async function getLockStats() {
         const snapshot = snapshotResult.status === 'fulfilled'
           ? snapshotResult.value
           : { userLocked: new Map<string, bigint>(), userWeight: new Map<string, bigint>() }
+        const price = priceResult.status === 'fulfilled' ? priceResult.value : emptyPricePayload()
+        const rewardLogs = rewardLogsResult.status === 'fulfilled' ? rewardLogsResult.value : []
 
         const lockers = [...snapshot.userLocked.entries()].filter(([, locked]) => locked > 0n).length
+        const now = Date.now()
+        const lockAprWindowMs = LOCK_APR_WINDOW_DAYS * 24 * 60 * 60 * 1000
+        let distributedInWindow = 0n
+        for (const log of rewardLogs) {
+          const ts = await getBlockTimestampMs(getLogBlockNumber(log))
+          if (ts >= now - lockAprWindowMs) {
+            distributedInWindow += toBigInt(log.args.distributedAmount)
+          }
+        }
+        const lootPriceNative = Number(price.payload.loot.priceNative ?? 0)
+        const tvlEth = Number(formatEther(totalLocked)) * lootPriceNative
+        const apr = tvlEth > 0
+          ? (Number(formatEther(distributedInWindow)) * (365 / LOCK_APR_WINDOW_DAYS) / tvlEth) * 100
+          : 0
 
         return {
           protocolLocked: totalLocked.toString(),
@@ -2469,6 +2496,7 @@ export async function getLockStats() {
           totalNotifiedFormatted: etherString(totalNotified),
           totalClaimed: totalClaimed.toString(),
           totalClaimedFormatted: etherString(totalClaimed),
+          apr: apr.toFixed(2),
           lockers,
         }
       }
