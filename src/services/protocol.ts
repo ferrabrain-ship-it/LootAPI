@@ -123,6 +123,7 @@ type TreasuryHoldingEntry = {
   address: Address | null
   balance: string
   balanceFormatted: string
+  allocation: number
   decimals: number
   logoUrl: string | null
   coingeckoUrl: string | null
@@ -143,6 +144,8 @@ const USER_HISTORY_MAX_LIMIT = 200
 const USER_HISTORY_CONCURRENCY = 8
 const LEADERBOARD_EARNERS_CONCURRENCY = 6
 const COINGECKO_META_TTL_MS = 6 * 60 * 60_000
+const TOKEN_PRICE_TTL_MS = 5 * 60_000
+const MIN_HOLDING_USD = 5
 let scanStartBlockPromise: Promise<bigint> | null = null
 let protocolStatusCache: { value: Promise<{ gameStarted: boolean; currentRoundId: bigint }>; expiresAt: number } | null = null
 let currentRoundCache: CurrentRoundCache | null = null
@@ -574,7 +577,7 @@ async function getTreasuryAgentConfig(): Promise<TreasuryAgentConfig> {
 
 async function getCoinGeckoTokenMeta(address: Address | null, native = false) {
   const normalizedAddress = address?.toLowerCase()
-  const cacheKey = native ? 'coingecko:token:native' : `coingecko:token:${normalizedAddress ?? 'unknown'}`
+  const cacheKey = native ? 'coingecko:v2:token:native' : `coingecko:v2:token:${normalizedAddress ?? 'unknown'}`
   const fallbackMeta = native
     ? COINGECKO_FALLBACKS.native_eth
     : (normalizedAddress ? COINGECKO_FALLBACKS[normalizedAddress] : undefined)
@@ -592,6 +595,7 @@ async function getCoinGeckoTokenMeta(address: Address | null, native = false) {
           coingeckoUrl: fallbackMeta?.coingeckoUrl ?? null,
           name: fallbackMeta?.name ?? null,
           symbol: fallbackMeta?.symbol ?? null,
+          priceUsd: null,
         }
       }
 
@@ -601,6 +605,7 @@ async function getCoinGeckoTokenMeta(address: Address | null, native = false) {
         name?: string
         symbol?: string
         image?: { small?: string | null; thumb?: string | null }
+        market_data?: { current_price?: { usd?: number | null } }
       }
 
       return {
@@ -612,6 +617,7 @@ async function getCoinGeckoTokenMeta(address: Address | null, native = false) {
             : fallbackMeta?.coingeckoUrl ?? null,
         name: data.name ?? fallbackMeta?.name ?? null,
         symbol: data.symbol ? data.symbol.toUpperCase() : fallbackMeta?.symbol ?? null,
+        priceUsd: typeof data.market_data?.current_price?.usd === 'number' ? data.market_data.current_price.usd : null,
       }
     } catch {
       return {
@@ -619,7 +625,43 @@ async function getCoinGeckoTokenMeta(address: Address | null, native = false) {
         coingeckoUrl: fallbackMeta?.coingeckoUrl ?? null,
         name: fallbackMeta?.name ?? null,
         symbol: fallbackMeta?.symbol ?? null,
+        priceUsd: null,
       }
+    }
+  })
+}
+
+async function getTokenPriceUsd(address: Address | null, native = false) {
+  const resolvedAddress = native ? BASE_WETH : address
+  if (!resolvedAddress) {
+    return 0
+  }
+
+  const cacheKey = `dexscreener:v1:price:${resolvedAddress.toLowerCase()}`
+
+  return withCache(cacheKey, TOKEN_PRICE_TTL_MS, async () => {
+    try {
+      const response = await fetch(`https://api.dexscreener.com/token-pairs/v1/base/${resolvedAddress.toLowerCase()}`, {
+        cache: 'no-store',
+      })
+
+      if (!response.ok) {
+        return resolvedAddress.toLowerCase() === '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913' ? 1 : 0
+      }
+
+      const pairs = await response.json() as Array<{ priceUsd?: string; liquidity?: { usd?: number } }>
+      if (!Array.isArray(pairs) || pairs.length === 0) {
+        return resolvedAddress.toLowerCase() === '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913' ? 1 : 0
+      }
+
+      const bestPair = [...pairs].sort((a, b) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0))[0]
+      const parsedPrice = Number.parseFloat(bestPair?.priceUsd ?? '0')
+
+      return Number.isFinite(parsedPrice) && parsedPrice > 0
+        ? parsedPrice
+        : (resolvedAddress.toLowerCase() === '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913' ? 1 : 0)
+    } catch {
+      return resolvedAddress.toLowerCase() === '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913' ? 1 : 0
     }
   })
 }
@@ -2452,8 +2494,17 @@ export async function getTreasuryHoldings() {
 
     const tokenEntries = await Promise.all(tokens.map(async (token) => {
       const meta = await getCoinGeckoTokenMeta(token.address)
+      const priceUsd = await getTokenPriceUsd(token.address)
 
       if (!meta.logoUrl && !priorityAddresses.has(token.address.toLowerCase())) {
+        return null
+      }
+
+      const balanceFormattedRaw = formatTokenAmount(token.balance, token.decimals)
+      const balanceValue = Number.parseFloat(balanceFormattedRaw)
+      const usdValue = balanceValue * priceUsd
+
+      if (usdValue < MIN_HOLDING_USD) {
         return null
       }
 
@@ -2461,8 +2512,9 @@ export async function getTreasuryHoldings() {
         symbol: meta.symbol ?? token.symbol,
         name: meta.name ?? token.name,
         address: token.address,
-        balance: formatTokenAmount(token.balance, token.decimals),
+        balance: balanceFormattedRaw,
         balanceFormatted: formatTokenBalance(token.balance, token.decimals),
+        allocation: usdValue,
         decimals: token.decimals,
         logoUrl: meta.logoUrl,
         coingeckoUrl: meta.coingeckoUrl,
@@ -2474,36 +2526,39 @@ export async function getTreasuryHoldings() {
 
     if (nativeBalance > 0n) {
       const nativeMeta = await getCoinGeckoTokenMeta(null, true)
-      entries.push({
-        symbol: nativeMeta.symbol ?? 'ETH',
-        name: nativeMeta.name ?? 'Ethereum',
-        address: null,
-        balance: formatTokenAmount(nativeBalance, 18),
-        balanceFormatted: formatTokenBalance(nativeBalance, 18),
-        decimals: 18,
-        logoUrl: nativeMeta.logoUrl,
-        coingeckoUrl: nativeMeta.coingeckoUrl,
-        isNative: true,
-      })
+      const nativePriceUsd = await getTokenPriceUsd(null, true)
+      const balanceFormattedRaw = formatTokenAmount(nativeBalance, 18)
+      const balanceValue = Number.parseFloat(balanceFormattedRaw)
+      const usdValue = nativePriceUsd * balanceValue
+      if (usdValue >= MIN_HOLDING_USD) {
+        entries.push({
+          symbol: nativeMeta.symbol ?? 'ETH',
+          name: nativeMeta.name ?? 'Ethereum',
+          address: null,
+          balance: balanceFormattedRaw,
+          balanceFormatted: formatTokenBalance(nativeBalance, 18),
+          allocation: usdValue,
+          decimals: 18,
+          logoUrl: nativeMeta.logoUrl,
+          coingeckoUrl: nativeMeta.coingeckoUrl,
+          isNative: true,
+        })
+      }
     }
-
-    const priorityByAddress = new Map<string, number>([
-      [config.asset.toLowerCase(), 0],
-      [BASE_WETH.toLowerCase(), 2],
-      [config.loot.toLowerCase(), 3],
-    ])
-
-    entries.sort((a, b) => {
-      const aPriority = a.isNative ? 1 : priorityByAddress.get(a.address?.toLowerCase() ?? '') ?? 10
-      const bPriority = b.isNative ? 1 : priorityByAddress.get(b.address?.toLowerCase() ?? '') ?? 10
-
-      if (aPriority !== bPriority) return aPriority - bPriority
-      return a.symbol.localeCompare(b.symbol)
-    })
+    const totalUsdValue = entries.reduce((sum, entry) => sum + entry.allocation, 0)
+    const normalizedEntries = entries
+      .map((entry) => ({
+        ...entry,
+        allocation: totalUsdValue > 0 ? (entry.allocation / totalUsdValue) * 100 : 0,
+      }))
+      .sort((a, b) => {
+        if (b.allocation !== a.allocation) return b.allocation - a.allocation
+        return a.symbol.localeCompare(b.symbol)
+      })
 
     return {
       walletAddress: config.multisig,
-      entries,
+      entries: normalizedEntries,
     }
   })
 }
