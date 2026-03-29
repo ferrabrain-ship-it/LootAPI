@@ -9,21 +9,6 @@ import { CONTRACTS, PROTOCOL_CONSTANTS } from '../config/contracts.js'
 import { env } from '../config/env.js'
 import { publicClient } from '../lib/client.js'
 import { countSelectedBlocks, decodeBlockMask, etherFixed, etherString, relativeTime, safeAddressEq, toBigInt } from '../lib/format.js'
-import {
-  getIndexedBuybacks,
-  getIndexedLeaderboardEarners,
-  getIndexedLeaderboardLockers,
-  getIndexedLeaderboardMiners,
-  getIndexedLeaderboardStakers,
-  getIndexedLockDistributions,
-  getIndexedLockSnapshot,
-  getIndexedRound,
-  getIndexedRoundMiners,
-  getIndexedRounds,
-  getIndexedStakingSnapshot,
-  getIndexedTreasuryStats,
-  getIndexedUserHistory,
-} from './protocolIndex.js'
 
 const DEPLOYED_EVENT = parseAbiItem(
   'event Deployed(uint64 indexed roundId, address indexed user, uint256 amountPerBlock, uint256 blockMask, uint256 totalAmount)'
@@ -42,7 +27,6 @@ const TRANSFER_EVENT = parseAbiItem('event Transfer(address indexed from, addres
 const VAULT_EVENT = parseAbiItem('event VaultReceived(uint256 amount, uint256 totalVaulted)')
 const STAKE_DEPOSIT_EVENT = parseAbiItem('event Deposited(address indexed user, uint256 amount, uint256 newBalance)')
 const STAKE_WITHDRAW_EVENT = parseAbiItem('event Withdrawn(address indexed user, uint256 amount, uint256 newBalance)')
-const STAKE_COMPOUND_EVENT = parseAbiItem('event YieldCompounded(address indexed user, uint256 amount, address indexed compounder, uint256 fee)')
 const YIELD_DISTRIBUTED_EVENT = parseAbiItem('event YieldDistributed(uint256 amount, uint256 newAccYieldPerShare)')
 const CHECKPOINTED_EVENT = parseAbiItem('event Checkpointed(uint64 indexed roundId, address indexed user, uint256 ethReward, uint256 lootReward)')
 const CLAIMED_LOOT_EVENT = parseAbiItem('event ClaimedLOOT(address indexed user, uint256 minedLoot, uint256 forgedLoot, uint256 fee, uint256 net)')
@@ -50,6 +34,11 @@ const TREASURY_AGENT_DEPOSIT_QUEUED_EVENT = parseAbiItem(
   'event UserDepositQueued(address indexed caller, address indexed receiver, uint256 assets)'
 )
 const TREASURY_AGENT_LOOT_CLAIMED_EVENT = parseAbiItem('event LootClaimed(address indexed user, uint256 amount)')
+const TREASURY_AGENT_CONFIG_ABI = parseAbi([
+  'function multisig() view returns (address)',
+  'function asset() view returns (address)',
+  'function loot() view returns (address)',
+])
 const LOCK_REWARD_NOTIFIED_EVENT = parseAbiItem(
   'event RewardNotified(uint256 amount, uint256 distributedAmount, uint256 unallocatedAmount, uint256 accRewardPerWeight)'
 )
@@ -76,7 +65,14 @@ const LOCKER_REWARDS_READ_ABI = parseAbi([
 const TREASURY_AGENT_READ_ABI = parseAbi([
   'function getUserPosition(address user) view returns (uint256 shares, uint256 pendingDepositAssets, uint256 pendingWithdrawShares, uint256 claimableWithdrawAssets, uint256 claimableLoot, uint256 redeemableAssets)',
 ])
+const ERC20_READ_ABI = parseAbi([
+  'function balanceOf(address) view returns (uint256)',
+  'function symbol() view returns (string)',
+  'function name() view returns (string)',
+  'function decimals() view returns (uint8)',
+])
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000' as Address
+const BASE_WETH = '0x4200000000000000000000000000000000000006' as Address
 
 export type DeploymentLog = Log<bigint, number, false, typeof DEPLOYED_EVENT> | Log<bigint, number, false, typeof DEPLOYED_FOR_EVENT>
 type RoundSettledLog = Log<bigint, number, false, typeof ROUND_SETTLED_EVENT>
@@ -90,22 +86,13 @@ type CurrentRoundBlockState = {
   id: number
   deployed: bigint
   minerCount: number
+  miners: Set<string>
 }
 type CurrentRoundCache = {
   roundId: bigint
   lastScannedBlock: bigint
   blocks: CurrentRoundBlockState[]
-}
-type CurrentRoundBase = {
-  roundId: string
-  startTime: number
-  endTime: number
-  totalDeployed: string
-  totalDeployedFormatted: string
-  lootpotPool: string
-  lootpotPoolFormatted: string
-  settled: boolean
-  blocks: ReturnType<typeof formatCurrentRoundBlocks>
+  processedLogIds: Set<string>
 }
 type LockerSnapshot = {
   userLocked: Map<string, bigint>
@@ -125,26 +112,37 @@ type StakeSnapshot = {
   balances: Map<string, bigint>
 }
 type TreasuryAgentUserPosition = readonly [bigint, bigint, bigint, bigint, bigint, bigint]
+type TreasuryAgentConfig = {
+  multisig: Address
+  asset: Address
+  loot: Address
+}
+type TreasuryHoldingEntry = {
+  symbol: string
+  name: string
+  address: Address | null
+  balance: string
+  balanceFormatted: string
+  decimals: number
+  logoUrl: string | null
+  coingeckoUrl: string | null
+  isNative: boolean
+}
 
 const blockTimestampCache = new Map<string, number>()
 const LOG_BLOCK_RANGE = 10_000n
 const MIN_LOG_BLOCK_RANGE = 1_000n
 const GLOBAL_LOG_CACHE_TTL_MS = 60_000
-const HEAVY_ROUTE_CACHE_TTL_MS = 120_000
+const HEAVY_ROUTE_CACHE_TTL_MS = 60_000
 const STAKING_APR_WINDOW_DAYS = 7
-const LOCK_APR_WINDOW_DAYS = 7
-const LOG_FETCH_CONCURRENCY = 4
 const RECENT_SETTLED_LOOKBACK = 1_000n
 const RECENT_SETTLED_LIST_LOOKBACK = 5_000n
 const RECENT_DEPLOY_LOOKBACK = 5_000n
-const RECENT_LEADERBOARD_LOOKBACK = 10_000n
-const LOOTPOT_FALLBACK_LOOKBACK_BLOCKS = 400_000n
-const CHAIN_FALLBACK_HISTORY_WINDOW_ROUNDS = 60n
-const CHAIN_FALLBACK_HISTORY_LOOKBACK_BLOCKS = 2_000n
 const RPC_RETRY_ATTEMPTS = 3
 const USER_HISTORY_MAX_LIMIT = 200
 const USER_HISTORY_CONCURRENCY = 8
 const LEADERBOARD_EARNERS_CONCURRENCY = 6
+const COINGECKO_META_TTL_MS = 6 * 60 * 60_000
 let scanStartBlockPromise: Promise<bigint> | null = null
 let protocolStatusCache: { value: Promise<{ gameStarted: boolean; currentRoundId: bigint }>; expiresAt: number } | null = null
 let currentRoundCache: CurrentRoundCache | null = null
@@ -152,81 +150,37 @@ const responseCache = new Map<string, { expiresAt: number; value: unknown }>()
 const inflightCache = new Map<string, Promise<unknown>>()
 const historicalLogCache = new Map<string, HistoricalLogCacheEntry>()
 const historicalLogInflight = new Map<string, Promise<unknown[]>>()
-const MAX_STALE_CACHE_MS = 5 * 60_000
-const HEAVY_CACHE_MAX_STALE_MS = 15 * 60_000
-const MAX_RESPONSE_CACHE_KEYS = 2_000
-const MAX_HISTORICAL_LOG_CACHE_KEYS = 128
-const MAX_BLOCK_TIMESTAMP_CACHE_KEYS = 20_000
-let cacheOpCount = 0
-
-type CacheOptions = {
-  staleWhileRevalidate?: boolean
-  maxStaleMs?: number
+const COINGECKO_FALLBACKS: Record<string, { logoUrl: string; coingeckoUrl: string; name: string; symbol: string }> = {
+  native_eth: {
+    logoUrl: 'https://coin-images.coingecko.com/coins/images/279/small/ethereum.png?1696501628',
+    coingeckoUrl: 'https://www.coingecko.com/en/coins/ethereum',
+    name: 'Ethereum',
+    symbol: 'ETH',
+  },
+  '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913': {
+    logoUrl: 'https://coin-images.coingecko.com/coins/images/6319/small/USDC.png?1769615602',
+    coingeckoUrl: 'https://www.coingecko.com/en/coins/usdc',
+    name: 'USD Coin',
+    symbol: 'USDC',
+  },
+  '0x4200000000000000000000000000000000000006': {
+    logoUrl: 'https://coin-images.coingecko.com/coins/images/39810/small/weth.png?1724139790',
+    coingeckoUrl: 'https://www.coingecko.com/en/coins/l2-standard-bridged-weth-base',
+    name: 'Wrapped Ether',
+    symbol: 'WETH',
+  },
 }
 
-function pruneMapBySize<K, V>(map: Map<K, V>, maxSize: number) {
-  while (map.size > maxSize) {
-    const oldestKey = map.keys().next().value
-    if (oldestKey === undefined) break
-    map.delete(oldestKey)
-  }
-}
-
-function pruneCaches(now = Date.now()) {
-  for (const [key, cached] of responseCache.entries()) {
-    if (cached.expiresAt + MAX_STALE_CACHE_MS < now && !inflightCache.has(key)) {
-      responseCache.delete(key)
-    }
-  }
-
-  for (const [key, cached] of historicalLogCache.entries()) {
-    if (cached.expiresAt < now && !historicalLogInflight.has(key)) {
-      historicalLogCache.delete(key)
-    }
-  }
-
-  pruneMapBySize(responseCache, MAX_RESPONSE_CACHE_KEYS)
-  pruneMapBySize(historicalLogCache, MAX_HISTORICAL_LOG_CACHE_KEYS)
-  pruneMapBySize(blockTimestampCache, MAX_BLOCK_TIMESTAMP_CACHE_KEYS)
-}
-
-async function withCache<T>(key: string, ttlMs: number, loader: () => Promise<T>, options?: CacheOptions): Promise<T> {
-  cacheOpCount += 1
-  if (cacheOpCount % 64 === 0) {
-    pruneCaches()
-  }
-
+async function withCache<T>(key: string, ttlMs: number, loader: () => Promise<T>): Promise<T> {
   const now = Date.now()
   const cached = responseCache.get(key)
-  const maxStaleMs = options?.maxStaleMs ?? Math.max(ttlMs * 3, MAX_STALE_CACHE_MS)
-  const canServeStale = !!cached && now <= (cached.expiresAt + maxStaleMs)
   if (cached && cached.expiresAt > now) {
     return cached.value as T
   }
 
   const inflight = inflightCache.get(key)
   if (inflight) {
-    if (options?.staleWhileRevalidate && canServeStale) {
-      return cached!.value as T
-    }
     return inflight as Promise<T>
-  }
-
-  if (options?.staleWhileRevalidate && canServeStale) {
-    const refreshPromise = loader()
-      .then((value) => {
-        responseCache.set(key, { expiresAt: Date.now() + ttlMs, value })
-        inflightCache.delete(key)
-        return value
-      })
-      .catch((error) => {
-        inflightCache.delete(key)
-        console.warn(`[cache] background refresh failed for "${key}": ${error instanceof Error ? error.message : String(error)}`)
-        return cached!.value as T
-      })
-
-    inflightCache.set(key, refreshPromise)
-    return cached!.value as T
   }
 
   const promise = loader()
@@ -237,42 +191,11 @@ async function withCache<T>(key: string, ttlMs: number, loader: () => Promise<T>
     })
     .catch((error) => {
       inflightCache.delete(key)
-      if (canServeStale) {
-        console.warn(`[cache] serving stale value for "${key}" after loader failure: ${error instanceof Error ? error.message : String(error)}`)
-        return cached!.value as T
-      }
       throw error
     })
 
   inflightCache.set(key, promise)
   return promise
-}
-
-async function preferIndexed<T>(indexedLoader: () => Promise<T | null>, fallbackLoader: () => Promise<T>) {
-  try {
-    const indexed = await indexedLoader()
-    if (indexed !== null) {
-      return indexed
-    }
-  } catch (error) {
-    console.warn(`[protocol-index] falling back to chain: ${error instanceof Error ? error.message : String(error)}`)
-  }
-
-  return fallbackLoader()
-}
-
-function getChainFallbackMinSettledRound(currentRoundId: bigint) {
-  if (currentRoundId <= 1n) return 1n
-  const latestSettledRoundId = currentRoundId - 1n
-  return latestSettledRoundId >= CHAIN_FALLBACK_HISTORY_WINDOW_ROUNDS
-    ? latestSettledRoundId - CHAIN_FALLBACK_HISTORY_WINDOW_ROUNDS + 1n
-    : 1n
-}
-
-function isWithinChainFallbackWindow(roundId: bigint, currentRoundId: bigint) {
-  if (currentRoundId <= 1n) return false
-  const latestSettledRoundId = currentRoundId - 1n
-  return roundId >= getChainFallbackMinSettledRound(currentRoundId) && roundId <= latestSettledRoundId
 }
 
 function normalizeAddress(value: unknown): Address {
@@ -289,7 +212,6 @@ async function getBlockTimestampMs(blockNumber: bigint): Promise<number> {
   const block = await withRpcRetries(() => publicClient.getBlock({ blockNumber }))
   const ts = Number(block.timestamp) * 1000
   blockTimestampCache.set(key, ts)
-  pruneMapBySize(blockTimestampCache, MAX_BLOCK_TIMESTAMP_CACHE_KEYS)
   return ts
 }
 
@@ -356,7 +278,6 @@ function isRetryableRpcErrorMessage(message: string) {
   const m = message.toLowerCase()
   return (
     m.includes('fetch failed') ||
-    m.includes('http request failed') ||
     m.includes('timeout') ||
     m.includes('timed out') ||
     m.includes('socket hang up') ||
@@ -368,10 +289,7 @@ function isRetryableRpcErrorMessage(message: string) {
     m.includes('quota') ||
     m.includes('credits') ||
     m.includes('resource not found') ||
-    m.includes('gateway timeout') ||
-    m.includes('expected double-quoted property name') ||
-    m.includes('unexpected token') ||
-    m.includes('syntaxerror')
+    m.includes('gateway timeout')
   )
 }
 
@@ -425,7 +343,7 @@ async function mapWithConcurrency<T, R>(
 
 async function getLogsPaged<TEvent extends AbiEvent | undefined>(
   params: {
-    address: Address
+    address?: Address
     event: TEvent
     args?: Record<string, unknown>
     fromBlock?: bigint
@@ -443,90 +361,74 @@ async function getLogsPaged<TEvent extends AbiEvent | undefined>(
     return []
   }
 
-  const ranges: Array<{ fromBlock: bigint; toBlock: bigint }> = []
-  for (let cursor = startBlock; cursor <= latestBlock; cursor += LOG_BLOCK_RANGE) {
-    const endBlock = cursor + LOG_BLOCK_RANGE - 1n > latestBlock
+  const chunks: Log<bigint, number, false, TEvent>[] = []
+  let cursor = startBlock
+  let blockRange = LOG_BLOCK_RANGE
+
+  while (cursor <= latestBlock) {
+    const endBlock = cursor + blockRange - 1n > latestBlock
       ? latestBlock
-      : cursor + LOG_BLOCK_RANGE - 1n
-    ranges.push({ fromBlock: cursor, toBlock: endBlock })
-  }
+      : cursor + blockRange - 1n
 
-  const chunks = await mapWithConcurrency(ranges, LOG_FETCH_CONCURRENCY, async ({ fromBlock, toBlock }) => {
-    return fetchLogsRange(params, fromBlock, toBlock)
-  })
+    try {
+      let logs: Log<bigint, number, false, TEvent>[] | null = null
 
-  return chunks.flat()
-}
+      for (let attempt = 0; attempt < RPC_RETRY_ATTEMPTS; attempt++) {
+        try {
+          logs = await publicClient.getLogs({
+            address: params.address,
+            event: params.event as never,
+            args: params.args as never,
+            fromBlock: cursor,
+            toBlock: endBlock,
+          }) as Log<bigint, number, false, TEvent>[]
+          break
+        } catch (rpcError) {
+          const rpcMessage = rpcError instanceof Error ? rpcError.message : String(rpcError)
+          const isRangeLimitError = isRangeLimitErrorMessage(rpcMessage)
+          const isRetryableRpcError = isRetryableRpcErrorMessage(rpcMessage)
+          const isLastAttempt = attempt >= RPC_RETRY_ATTEMPTS - 1
 
-async function fetchLogsRange<TEvent extends AbiEvent | undefined>(
-  params: {
-    address: Address
-    event: TEvent
-    args?: Record<string, unknown>
-  },
-  fromBlock: bigint,
-  toBlock: bigint
-): Promise<Log<bigint, number, false, TEvent>[]> {
-  try {
-    let logs: Log<bigint, number, false, TEvent>[] | null = null
+          if (isRangeLimitError || !isRetryableRpcError || isLastAttempt) {
+            throw rpcError
+          }
 
-    for (let attempt = 0; attempt < RPC_RETRY_ATTEMPTS; attempt++) {
-      try {
-        logs = await publicClient.getLogs({
-          address: params.address,
-          event: params.event as never,
-          args: params.args as never,
-          fromBlock,
-          toBlock,
-        }) as Log<bigint, number, false, TEvent>[]
-        break
-      } catch (rpcError) {
-        const rpcMessage = rpcError instanceof Error ? rpcError.message : String(rpcError)
-        const isRangeLimitError = isRangeLimitErrorMessage(rpcMessage)
-        const isRetryableRpcError = isRetryableRpcErrorMessage(rpcMessage)
-        const isLastAttempt = attempt >= RPC_RETRY_ATTEMPTS - 1
-
-        if (isRangeLimitError || !isRetryableRpcError || isLastAttempt) {
-          throw rpcError
+          await sleep(120 * (attempt + 1))
         }
+      }
 
-        await sleep(120 * (attempt + 1))
+      if (!logs) {
+        throw new Error('Failed to fetch logs after retries')
+      }
+
+      chunks.push(...logs)
+      cursor = endBlock + 1n
+      if (blockRange < LOG_BLOCK_RANGE) {
+        blockRange = LOG_BLOCK_RANGE
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      const isRangeLimitError = isRangeLimitErrorMessage(message)
+
+      if (!isRangeLimitError || blockRange <= MIN_LOG_BLOCK_RANGE) {
+        throw error
+      }
+
+      blockRange = blockRange / 2n
+      if (blockRange < MIN_LOG_BLOCK_RANGE) {
+        blockRange = MIN_LOG_BLOCK_RANGE
       }
     }
-
-    if (!logs) {
-      throw new Error('Failed to fetch logs after retries')
-    }
-
-    return logs
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    const isRangeLimitError = isRangeLimitErrorMessage(message)
-    const blockSpan = toBlock - fromBlock + 1n
-
-    if (!isRangeLimitError || blockSpan <= MIN_LOG_BLOCK_RANGE) {
-      throw error
-    }
-
-    const mid = fromBlock + (blockSpan / 2n) - 1n
-    const leftToBlock = mid < fromBlock ? fromBlock : mid
-    const rightFromBlock = leftToBlock + 1n
-    const [left, right] = await Promise.all([
-      fetchLogsRange(params, fromBlock, leftToBlock),
-      rightFromBlock <= toBlock
-        ? fetchLogsRange(params, rightFromBlock, toBlock)
-        : Promise.resolve([] as Log<bigint, number, false, TEvent>[]),
-    ])
-
-    return [...left, ...right]
   }
+
+  return chunks
 }
 
 async function getCachedLogsPaged<TEvent extends AbiEvent | undefined>(
   key: string,
   ttlMs: number,
   params: {
-    address: Address
+    address?: Address
     event: TEvent
     args?: Record<string, unknown>
     fromBlock?: bigint
@@ -625,6 +527,103 @@ function emptyPricePayload() {
   }
 }
 
+function formatTokenAmount(value: bigint, decimals: number) {
+  return formatUnits(value, decimals)
+}
+
+function formatTokenBalance(value: bigint, decimals: number) {
+  const parsed = Number.parseFloat(formatUnits(value, decimals))
+  const maximumFractionDigits = parsed >= 1_000 ? 2 : parsed >= 1 ? 4 : 6
+
+  return parsed.toLocaleString('en-US', {
+    minimumFractionDigits: 0,
+    maximumFractionDigits,
+  })
+}
+
+async function getTreasuryAgentStartBlock() {
+  return withCache('treasury-agent:start-block', HEAVY_ROUTE_CACHE_TTL_MS, async () => {
+    const deploymentBlock = await findContractDeploymentBlock(CONTRACTS.treasuryAgent)
+    return deploymentBlock > 250n ? deploymentBlock - 250n : 0n
+  })
+}
+
+async function getTreasuryAgentConfig(): Promise<TreasuryAgentConfig> {
+  return withCache('treasury-agent:config', HEAVY_ROUTE_CACHE_TTL_MS, async () => {
+    const [multisig, asset, loot] = await Promise.all([
+      withRpcRetries(() => publicClient.readContract({
+        address: CONTRACTS.treasuryAgent,
+        abi: TREASURY_AGENT_CONFIG_ABI,
+        functionName: 'multisig',
+      }) as Promise<Address>),
+      withRpcRetries(() => publicClient.readContract({
+        address: CONTRACTS.treasuryAgent,
+        abi: TREASURY_AGENT_CONFIG_ABI,
+        functionName: 'asset',
+      }) as Promise<Address>),
+      withRpcRetries(() => publicClient.readContract({
+        address: CONTRACTS.treasuryAgent,
+        abi: TREASURY_AGENT_CONFIG_ABI,
+        functionName: 'loot',
+      }) as Promise<Address>),
+    ])
+
+    return { multisig, asset, loot }
+  })
+}
+
+async function getCoinGeckoTokenMeta(address: Address | null, native = false) {
+  const normalizedAddress = address?.toLowerCase()
+  const cacheKey = native ? 'coingecko:token:native' : `coingecko:token:${normalizedAddress ?? 'unknown'}`
+  const fallbackMeta = native
+    ? COINGECKO_FALLBACKS.native_eth
+    : (normalizedAddress ? COINGECKO_FALLBACKS[normalizedAddress] : undefined)
+
+  return withCache(cacheKey, COINGECKO_META_TTL_MS, async () => {
+    const endpoint = native
+      ? 'https://api.coingecko.com/api/v3/coins/ethereum?localization=false&tickers=false&market_data=false&community_data=false&developer_data=false&sparkline=false'
+      : `https://api.coingecko.com/api/v3/coins/base/contract/${normalizedAddress}`
+
+    try {
+      const response = await fetch(endpoint, { cache: 'no-store' })
+      if (!response.ok) {
+        return {
+          logoUrl: fallbackMeta?.logoUrl ?? null,
+          coingeckoUrl: fallbackMeta?.coingeckoUrl ?? null,
+          name: fallbackMeta?.name ?? null,
+          symbol: fallbackMeta?.symbol ?? null,
+        }
+      }
+
+      const data = await response.json() as {
+        id?: string
+        web_slug?: string
+        name?: string
+        symbol?: string
+        image?: { small?: string | null; thumb?: string | null }
+      }
+
+      return {
+        logoUrl: data.image?.small ?? data.image?.thumb ?? fallbackMeta?.logoUrl ?? null,
+        coingeckoUrl: data.web_slug
+          ? `https://www.coingecko.com/en/coins/${data.web_slug}`
+          : data.id
+            ? `https://www.coingecko.com/en/coins/${data.id}`
+            : fallbackMeta?.coingeckoUrl ?? null,
+        name: data.name ?? fallbackMeta?.name ?? null,
+        symbol: data.symbol ? data.symbol.toUpperCase() : fallbackMeta?.symbol ?? null,
+      }
+    } catch {
+      return {
+        logoUrl: fallbackMeta?.logoUrl ?? null,
+        coingeckoUrl: fallbackMeta?.coingeckoUrl ?? null,
+        name: fallbackMeta?.name ?? null,
+        symbol: fallbackMeta?.symbol ?? null,
+      }
+    }
+  })
+}
+
 function formatPricePayload(priceUsd: number, pairs: Array<{ priceUsd?: string; priceNative?: string; volume?: { h24?: number }; liquidity?: { usd?: number }; priceChange?: { h24?: number }; fdv?: number }>) {
   const best = [...pairs].sort((a, b) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0))[0]
   return {
@@ -674,12 +673,8 @@ async function isRecentRound(roundId: bigint) {
 }
 
 export async function getLootPrice() {
-  return withCache('loot-price', 20_000, async () => {
   try {
-    const res = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${CONTRACTS.loot}`, {
-      cache: 'no-store',
-      signal: AbortSignal.timeout(3_000),
-    })
+    const res = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${CONTRACTS.loot}`, { cache: 'no-store' })
     if (!res.ok) {
       return emptyPricePayload()
     }
@@ -696,14 +691,10 @@ export async function getLootPrice() {
   } catch {
     return emptyPricePayload()
   }
-  }, {
-    staleWhileRevalidate: true,
-    maxStaleMs: 2 * 60_000,
-  })
 }
 
 export async function getLootPriceCached() {
-  return getLootPrice()
+  return withCache('loot-price', 15_000, getLootPrice)
 }
 
 export async function getStats() {
@@ -727,9 +718,6 @@ export async function getStats() {
       totalMintedFormatted: etherString(totalMinted),
       ...price.payload,
     }
-  }, {
-    staleWhileRevalidate: true,
-    maxStaleMs: HEAVY_CACHE_MAX_STALE_MS,
   })
 }
 
@@ -787,100 +775,6 @@ export async function getAllDeploymentLogs() {
   })
 }
 
-async function getDeploymentLogsForUser(address: Address) {
-  const normalized = getAddress(address)
-  return withCache(`logs:grid:deployments:user:${normalized}`, 30_000, async () => {
-    const [direct, delegated] = await Promise.all([
-      getCachedLogsPaged(`grid:deployed:user:${normalized}`, 30_000, {
-        address: CONTRACTS.gridMining,
-        event: DEPLOYED_EVENT,
-        args: { user: normalized },
-        fromBlock: env.scanStartBlock,
-        toBlock: 'latest',
-      }),
-      getCachedLogsPaged(`grid:deployed-for:user:${normalized}`, 30_000, {
-        address: CONTRACTS.gridMining,
-        event: DEPLOYED_FOR_EVENT,
-        args: { user: normalized },
-        fromBlock: env.scanStartBlock,
-        toBlock: 'latest',
-      }),
-    ])
-
-    return [...direct, ...delegated].sort(compareLogsAsc) as DeploymentLog[]
-  }, {
-    staleWhileRevalidate: true,
-    maxStaleMs: 2 * 60_000,
-  })
-}
-
-async function getRecentDeploymentLogsForUser(address: Address, lookbackBlocks = CHAIN_FALLBACK_HISTORY_LOOKBACK_BLOCKS) {
-  const normalized = getAddress(address)
-  return withCache(`logs:grid:deployments:user:${normalized}:recent:${lookbackBlocks.toString()}`, 15_000, async () => {
-    const latestBlock = await withRpcRetries(() => publicClient.getBlockNumber())
-    const fromBlock = latestBlock > lookbackBlocks
-      ? latestBlock - lookbackBlocks
-      : env.scanStartBlock
-
-    const [direct, delegated] = await Promise.all([
-      getLogsPaged({
-        address: CONTRACTS.gridMining,
-        event: DEPLOYED_EVENT,
-        args: { user: normalized },
-        fromBlock,
-        toBlock: 'latest',
-      }),
-      getLogsPaged({
-        address: CONTRACTS.gridMining,
-        event: DEPLOYED_FOR_EVENT,
-        args: { user: normalized },
-        fromBlock,
-        toBlock: 'latest',
-      }),
-    ])
-
-    return [...direct, ...delegated].sort(compareLogsAsc) as DeploymentLog[]
-  }, {
-    staleWhileRevalidate: true,
-    maxStaleMs: 60_000,
-  })
-}
-
-async function getRecentDeploymentTotals(lookbackBlocks = RECENT_LEADERBOARD_LOOKBACK) {
-  return withCache(`grid:deployments:recent:${lookbackBlocks.toString()}`, 30_000, async () => {
-    const latestBlock = await withRpcRetries(() => publicClient.getBlockNumber())
-    const fromBlock = latestBlock > lookbackBlocks
-      ? latestBlock - lookbackBlocks
-      : env.scanStartBlock
-
-    const [direct, delegated] = await Promise.all([
-      getLogsPaged({
-        address: CONTRACTS.gridMining,
-        event: DEPLOYED_EVENT,
-        fromBlock,
-        toBlock: 'latest',
-      }),
-      getLogsPaged({
-        address: CONTRACTS.gridMining,
-        event: DEPLOYED_FOR_EVENT,
-        fromBlock,
-        toBlock: 'latest',
-      }),
-    ])
-
-    const totalsByUser = new Map<string, bigint>()
-    for (const log of [...direct, ...delegated] as DeploymentLog[]) {
-      const user = normalizeAddress(log.args.user)
-      totalsByUser.set(user, (totalsByUser.get(user) ?? 0n) + toBigInt(log.args.totalAmount))
-    }
-
-    return { totalsByUser, fromBlock, latestBlock }
-  }, {
-    staleWhileRevalidate: true,
-    maxStaleMs: 2 * 60_000,
-  })
-}
-
 async function getDeploymentSnapshot() {
   return withCache('snapshot:grid:deployments', GLOBAL_LOG_CACHE_TTL_MS, async (): Promise<DeploymentSnapshot> => {
     const logs = await getAllDeploymentLogs()
@@ -915,11 +809,11 @@ async function getRoundSettledLogs() {
   }) as Promise<RoundSettledLog[]>
 }
 
-async function getRecentRoundSettledLogs(lookbackBlocks = RECENT_SETTLED_LIST_LOOKBACK) {
-  return withCache(`logs:grid:round-settled:recent:${lookbackBlocks.toString()}`, 15_000, async () => {
+async function getRecentRoundSettledLogs() {
+  return withCache('logs:grid:round-settled:recent', 15_000, async () => {
     const latestBlock = await withRpcRetries(() => publicClient.getBlockNumber())
-    const recentFromBlock = latestBlock > lookbackBlocks
-      ? latestBlock - lookbackBlocks
+    const recentFromBlock = latestBlock > RECENT_SETTLED_LIST_LOOKBACK
+      ? latestBlock - RECENT_SETTLED_LIST_LOOKBACK
       : env.scanStartBlock
 
     return getLogsPaged({
@@ -987,64 +881,12 @@ async function getVaultLogs() {
   })
 }
 
-async function getLatestVaultTotal() {
-  return withCache('treasury:vault:latest-total', 30_000, async () => {
-    const latestBlock = await withRpcRetries(() => publicClient.getBlockNumber())
-    let toBlock = latestBlock
-
-    while (toBlock >= env.scanStartBlock) {
-      const fromBlock = toBlock >= LOG_BLOCK_RANGE
-        ? (toBlock - LOG_BLOCK_RANGE + 1n > env.scanStartBlock ? toBlock - LOG_BLOCK_RANGE + 1n : env.scanStartBlock)
-        : env.scanStartBlock
-      const logs = await fetchLogsRange({
-        address: CONTRACTS.treasury,
-        event: VAULT_EVENT,
-      }, fromBlock, toBlock)
-
-      if (logs.length > 0) {
-        const latest = logs.sort(compareLogsDesc)[0]
-        return toBigInt(latest.args.totalVaulted ?? latest.args.amount)
-      }
-
-      if (fromBlock === env.scanStartBlock) {
-        break
-      }
-
-      toBlock = fromBlock - 1n
-    }
-
-    return 0n
-  }, {
-    staleWhileRevalidate: true,
-    maxStaleMs: HEAVY_CACHE_MAX_STALE_MS,
-  })
-}
-
 async function getBuybackLogs() {
   return getCachedLogsPaged('treasury:buybacks', GLOBAL_LOG_CACHE_TTL_MS, {
     address: CONTRACTS.treasury,
     event: BUYBACK_EVENT,
     fromBlock: env.scanStartBlock,
     toBlock: 'latest',
-  })
-}
-
-async function getRecentBuybackLogs(lookbackBlocks = CHAIN_FALLBACK_HISTORY_LOOKBACK_BLOCKS) {
-  return withCache(`treasury:buybacks:recent:${lookbackBlocks.toString()}`, 30_000, async () => {
-    const latestBlock = await withRpcRetries(() => publicClient.getBlockNumber())
-    const fromBlock = latestBlock > lookbackBlocks
-      ? latestBlock - lookbackBlocks
-      : env.scanStartBlock
-
-    return getLogsPaged({
-      address: CONTRACTS.treasury,
-      event: BUYBACK_EVENT,
-      fromBlock,
-      toBlock: 'latest',
-    })
-  }, {
-    staleWhileRevalidate: true,
-    maxStaleMs: 60_000,
   })
 }
 
@@ -1075,37 +917,6 @@ async function getStandaloneBurnLogs() {
   })
 }
 
-async function getRecentStandaloneBurnLogs(lookbackBlocks = CHAIN_FALLBACK_HISTORY_LOOKBACK_BLOCKS) {
-  return withCache(`loot:standalone-burns:recent:${lookbackBlocks.toString()}`, 30_000, async () => {
-    const latestBlock = await withRpcRetries(() => publicClient.getBlockNumber())
-    const fromBlock = latestBlock > lookbackBlocks
-      ? latestBlock - lookbackBlocks
-      : env.scanStartBlock
-
-    const [burnLogs, buybackLogs] = await Promise.all([
-      getLogsPaged({
-        address: CONTRACTS.loot,
-        event: TRANSFER_EVENT,
-        args: { to: ZERO_ADDRESS },
-        fromBlock,
-        toBlock: 'latest',
-      }) as Promise<DirectBurnLog[]>,
-      getRecentBuybackLogs(lookbackBlocks),
-    ])
-
-    const buybackTxHashes = new Set(
-      buybackLogs.map((log) => log.transactionHash.toLowerCase())
-    )
-
-    return burnLogs
-      .filter((log) => !buybackTxHashes.has(log.transactionHash.toLowerCase()))
-      .sort(compareLogsDesc)
-  }, {
-    staleWhileRevalidate: true,
-    maxStaleMs: 60_000,
-  })
-}
-
 async function getStakeDepositLogs() {
   return getCachedLogsPaged('staking:deposits', GLOBAL_LOG_CACHE_TTL_MS, {
     address: CONTRACTS.staking,
@@ -1124,21 +935,11 @@ async function getStakeWithdrawLogs() {
   })
 }
 
-async function getStakeCompoundLogs() {
-  return getCachedLogsPaged('staking:compounds', GLOBAL_LOG_CACHE_TTL_MS, {
-    address: CONTRACTS.staking,
-    event: STAKE_COMPOUND_EVENT,
-    fromBlock: env.scanStartBlock,
-    toBlock: 'latest',
-  })
-}
-
 async function getStakeSnapshot() {
   return withCache('snapshot:staking:balances', GLOBAL_LOG_CACHE_TTL_MS, async (): Promise<StakeSnapshot> => {
-    const [deposits, withdrawals, compounds] = await Promise.all([
+    const [deposits, withdrawals] = await Promise.all([
       getStakeDepositLogs(),
       getStakeWithdrawLogs(),
-      getStakeCompoundLogs(),
     ])
     const balances = new Map<string, bigint>()
 
@@ -1150,11 +951,6 @@ async function getStakeSnapshot() {
     for (const log of withdrawals) {
       const address = normalizeAddress(log.args.user)
       balances.set(address, (balances.get(address) ?? 0n) - toBigInt(log.args.amount))
-    }
-
-    for (const log of compounds) {
-      const address = normalizeAddress(log.args.user)
-      balances.set(address, (balances.get(address) ?? 0n) + toBigInt(log.args.amount))
     }
 
     return { balances }
@@ -1176,25 +972,6 @@ async function getCheckpointLogs() {
     event: CHECKPOINTED_EVENT,
     fromBlock: env.scanStartBlock,
     toBlock: 'latest',
-  })
-}
-
-async function getRecentCheckpointLogs(lookbackBlocks = RECENT_LEADERBOARD_LOOKBACK) {
-  return withCache(`grid:checkpointed:recent:${lookbackBlocks.toString()}`, 30_000, async () => {
-    const latestBlock = await withRpcRetries(() => publicClient.getBlockNumber())
-    const recentFromBlock = latestBlock > lookbackBlocks
-      ? latestBlock - lookbackBlocks
-      : env.scanStartBlock
-
-    return getLogsPaged({
-      address: CONTRACTS.gridMining,
-      event: CHECKPOINTED_EVENT,
-      fromBlock: recentFromBlock,
-      toBlock: 'latest',
-    })
-  }, {
-    staleWhileRevalidate: true,
-    maxStaleMs: 2 * 60_000,
   })
 }
 
@@ -1237,25 +1014,6 @@ async function getLockRewardNotifiedLogs() {
     event: LOCK_REWARD_NOTIFIED_EVENT,
     fromBlock: env.scanStartBlock,
     toBlock: 'latest',
-  })
-}
-
-async function getRecentLockRewardNotifiedLogs(lookbackBlocks = CHAIN_FALLBACK_HISTORY_LOOKBACK_BLOCKS) {
-  return withCache(`locker-rewards:notified:recent:${lookbackBlocks.toString()}`, 30_000, async () => {
-    const latestBlock = await withRpcRetries(() => publicClient.getBlockNumber())
-    const fromBlock = latestBlock > lookbackBlocks
-      ? latestBlock - lookbackBlocks
-      : env.scanStartBlock
-
-    return getLogsPaged({
-      address: CONTRACTS.lockerRewards,
-      event: LOCK_REWARD_NOTIFIED_EVENT,
-      fromBlock,
-      toBlock: 'latest',
-    })
-  }, {
-    staleWhileRevalidate: true,
-    maxStaleMs: 60_000,
   })
 }
 
@@ -1314,19 +1072,26 @@ function emptyCurrentRoundBlocks() {
     id,
     deployed: 0n,
     minerCount: 0,
+    miners: new Set<string>(),
   }))
 }
 
 function applyDeploymentLogToBlocks(blocks: CurrentRoundBlockState[], log: DeploymentLog) {
   const amountPerBlock = toBigInt(log.args.amountPerBlock)
   const blockIds = decodeBlockMask(toBigInt(log.args.blockMask))
+  const miner = normalizeAddress(log.args.user)
 
   for (const blockId of blockIds) {
     const block = blocks[blockId]
     if (!block) continue
     block.deployed += amountPerBlock
-    block.minerCount += 1
+    block.miners.add(miner)
+    block.minerCount = block.miners.size
   }
+}
+
+function deploymentLogId(log: DeploymentLog) {
+  return `${log.transactionHash}:${log.logIndex}`
 }
 
 function formatCurrentRoundBlocks(blocks: CurrentRoundBlockState[]) {
@@ -1348,6 +1113,7 @@ async function getCurrentRoundBlocks(roundId: bigint) {
       roundId,
       lastScannedBlock: fromBlock > 0n ? fromBlock - 1n : 0n,
       blocks: emptyCurrentRoundBlocks(),
+      processedLogIds: new Set<string>(),
     }
   }
 
@@ -1371,6 +1137,9 @@ async function getCurrentRoundBlocks(roundId: bigint) {
     ])
 
     for (const log of [...direct, ...delegated].sort(compareLogsAsc) as DeploymentLog[]) {
+      const logId = deploymentLogId(log)
+      if (currentRoundCache.processedLogIds.has(logId)) continue
+      currentRoundCache.processedLogIds.add(logId)
       applyDeploymentLogToBlocks(currentRoundCache.blocks, log)
     }
 
@@ -1386,19 +1155,26 @@ function buildBlockStats(deployLogs: DeploymentLog[]) {
     deployed: 0n,
     deployedFormatted: '0.0',
     minerCount: 0,
+    miners: new Set<string>(),
   }))
+  const seenLogIds = new Set<string>()
 
   for (const log of deployLogs) {
+    const logId = deploymentLogId(log)
+    if (seenLogIds.has(logId)) continue
+    seenLogIds.add(logId)
     const blockMask = toBigInt(log.args.blockMask)
     const amountPerBlock = toBigInt(log.args.amountPerBlock)
+    const miner = normalizeAddress(log.args.user)
     const selected = decodeBlockMask(blockMask)
     for (const blockId of selected) {
       blocks[blockId].deployed += amountPerBlock
-      blocks[blockId].minerCount += 1
+      blocks[blockId].miners.add(miner)
+      blocks[blockId].minerCount = blocks[blockId].miners.size
     }
   }
 
-  return blocks.map((block) => ({
+  return blocks.map(({ miners: _miners, ...block }) => ({
     ...block,
     deployed: block.deployed.toString(),
     deployedFormatted: etherString(block.deployed),
@@ -1410,7 +1186,11 @@ function computeUserDeployed(mask: bigint, amountPerBlock: bigint) {
 }
 
 export async function getCurrentRound(user?: string) {
-  const baseRound = await withCache('current-round:shared', 2_000, async (): Promise<CurrentRoundBase> => {
+  const cacheKey = user && isAddress(user)
+    ? `current-round:${getAddress(user)}`
+    : 'current-round'
+
+  return withCache(cacheKey, 2_000, async () => {
     const [roundInfo, lootpotPool] = await Promise.all([
       withRpcRetries(() => publicClient.readContract({
         address: CONTRACTS.gridMining,
@@ -1441,10 +1221,23 @@ export async function getCurrentRound(user?: string) {
           deployedFormatted: '0',
           minerCount: 0,
         })),
+        userDeployed: '0',
+        userDeployedFormatted: '0',
       }
     }
 
     const blocks = await getCurrentRoundBlocks(roundId)
+
+    let userDeployed = 0n
+    if (user && isAddress(user)) {
+      const minerInfo = await withRpcRetries(() => publicClient.readContract({
+        address: CONTRACTS.gridMining,
+        abi: gridMiningAbi,
+        functionName: 'getMinerInfo',
+        args: [roundId, getAddress(user)],
+      }) as Promise<[bigint, bigint, boolean]>)
+      userDeployed = computeUserDeployed(minerInfo[0], minerInfo[1])
+    }
 
     return {
       roundId: roundId.toString(),
@@ -1456,37 +1249,9 @@ export async function getCurrentRound(user?: string) {
       lootpotPoolFormatted: etherString(lootpotPool),
       settled: false,
       blocks,
-    }
-  }, {
-    staleWhileRevalidate: true,
-    maxStaleMs: 30_000,
-  })
-
-  if (!user || !isAddress(user) || baseRound.roundId === '0') {
-    return {
-      ...baseRound,
-      userDeployed: '0',
-      userDeployedFormatted: '0',
-    }
-  }
-
-  return withCache(`current-round:user:${getAddress(user)}`, 2_000, async () => {
-    const minerInfo = await withRpcRetries(() => publicClient.readContract({
-      address: CONTRACTS.gridMining,
-      abi: gridMiningAbi,
-      functionName: 'getMinerInfo',
-      args: [BigInt(baseRound.roundId), getAddress(user)],
-    }) as Promise<[bigint, bigint, boolean]>)
-    const userDeployed = computeUserDeployed(minerInfo[0], minerInfo[1])
-
-    return {
-      ...baseRound,
       userDeployed: userDeployed.toString(),
       userDeployedFormatted: etherString(userDeployed),
     }
-  }, {
-    staleWhileRevalidate: true,
-    maxStaleMs: 30_000,
   })
 }
 
@@ -1585,12 +1350,7 @@ async function getRoundState(roundId: bigint) {
 
 export async function getRound(roundIdInput: string | number | bigint) {
   const roundId = BigInt(roundIdInput)
-  const loadFromChain = async () => {
-    const status = await getProtocolStatus()
-    if (!status.gameStarted || !isWithinChainFallbackWindow(roundId, status.currentRoundId)) {
-      return null as never
-    }
-
+  const load = async () => {
     const roundState = await getRoundState(roundId)
 
     if (roundState.totalDeployed === 0n || roundState.winnersDeployed === 0n) {
@@ -1650,11 +1410,6 @@ export async function getRound(roundIdInput: string | number | bigint) {
     }
   }
 
-  const load = () => preferIndexed(
-    () => getIndexedRound(roundId),
-    loadFromChain
-  )
-
   if (await isRecentRound(roundId)) {
     return load()
   }
@@ -1664,12 +1419,7 @@ export async function getRound(roundIdInput: string | number | bigint) {
 
 export async function getRoundMiners(roundIdInput: string | number | bigint) {
   const roundId = BigInt(roundIdInput)
-  const loadFromChain = async () => {
-    const status = await getProtocolStatus()
-    if (!status.gameStarted || !isWithinChainFallbackWindow(roundId, status.currentRoundId)) {
-      return null as never
-    }
-
+  const load = async () => {
     const roundState = await getRoundState(roundId)
 
     if (roundState.totalDeployed === 0n || roundState.winnersDeployed === 0n) {
@@ -1726,11 +1476,6 @@ export async function getRoundMiners(roundIdInput: string | number | bigint) {
     }
   }
 
-  const load = () => preferIndexed(
-    () => getIndexedRoundMiners(roundId),
-    loadFromChain
-  )
-
   if (await isRecentRound(roundId)) {
     return load()
   }
@@ -1740,66 +1485,46 @@ export async function getRoundMiners(roundIdInput: string | number | bigint) {
 
 export async function getRounds(page = 1, limit = 12, lootpotOnly = false) {
   return withCache(`rounds:${page}:${limit}:${lootpotOnly ? 'lootpot' : 'all'}`, HEAVY_ROUTE_CACHE_TTL_MS, async () => {
-    return preferIndexed(
-      async () => {
-        const indexed = await getIndexedRounds(page, limit, lootpotOnly)
-        if (lootpotOnly && indexed && indexed.pagination.total === 0) {
-          return null
-        }
-        return indexed
-      },
-      async () => {
-        const status = await getProtocolStatus()
-        if (!status.gameStarted || status.currentRoundId === 0n) {
-          return {
-            rounds: [],
-            pagination: { page, limit, total: 0, pages: 1 },
-          }
-        }
-
-        const minRoundId = getChainFallbackMinSettledRound(status.currentRoundId)
-        const latestSettledRoundId = status.currentRoundId - 1n
-
-        if (!lootpotOnly) {
-          const total = latestSettledRoundId >= minRoundId
-            ? Number(latestSettledRoundId - minRoundId + 1n)
-            : 0
-          const pages = Math.max(1, Math.ceil(total / limit))
-          const startRound = Number(latestSettledRoundId) - ((page - 1) * limit)
-          const endRound = Math.max(startRound - limit + 1, Number(minRoundId))
-          const slice: number[] = []
-
-          for (let roundId = startRound; roundId >= endRound; roundId -= 1) {
-            if (roundId >= Number(minRoundId)) slice.push(roundId)
-          }
-
-          const rounds = await mapWithConcurrency(slice, 4, async (roundId) => getRound(roundId))
-          return {
-            rounds,
-            pagination: { page, limit, total, pages },
-          }
-        }
-
-        const logs = await getRecentRoundSettledLogs(LOOTPOT_FALLBACK_LOOKBACK_BLOCKS)
-        let roundIds = logs.map((log) => Number(log.args.roundId))
-        roundIds = logs.filter((log) => toBigInt(log.args.lootpotAmount ?? 0n) > 0n).map((log) => Number(log.args.roundId))
-
-        roundIds = [...new Set(roundIds)]
-          .sort((a, b) => b - a)
-        const total = roundIds.length
-        const pages = Math.max(1, Math.ceil(total / limit))
-        const slice = roundIds.slice((page - 1) * limit, page * limit)
-
-        const rounds = await mapWithConcurrency(slice, 4, async (roundId) => getRound(roundId))
-        return {
-          rounds,
-          pagination: { page, limit, total, pages },
-        }
+    const status = await getProtocolStatus()
+    if (!status.gameStarted || status.currentRoundId === 0n) {
+      return {
+        rounds: [],
+        pagination: { page, limit, total: 0, pages: 1 },
       }
-    )
-  }, {
-    staleWhileRevalidate: true,
-    maxStaleMs: HEAVY_CACHE_MAX_STALE_MS,
+    }
+
+    if (!lootpotOnly) {
+      const total = Number(status.currentRoundId > 0n ? status.currentRoundId - 1n : 0n)
+      const pages = Math.max(1, Math.ceil(total / limit))
+      const startRound = total - ((page - 1) * limit)
+      const endRound = Math.max(startRound - limit + 1, 1)
+      const slice: number[] = []
+
+      for (let roundId = startRound; roundId >= endRound; roundId -= 1) {
+        if (roundId > 0) slice.push(roundId)
+      }
+
+      const rounds = await mapWithConcurrency(slice, 4, async (roundId) => getRound(roundId))
+      return {
+        rounds,
+        pagination: { page, limit, total, pages },
+      }
+    }
+
+    const logs = await getRoundSettledLogs()
+    let roundIds = logs.map((log) => Number(log.args.roundId))
+    roundIds = logs.filter((log) => toBigInt(log.args.lootpotAmount ?? 0n) > 0n).map((log) => Number(log.args.roundId))
+
+    roundIds = [...new Set(roundIds)].sort((a, b) => b - a)
+    const total = roundIds.length
+    const pages = Math.max(1, Math.ceil(total / limit))
+    const slice = roundIds.slice((page - 1) * limit, page * limit)
+
+    const rounds = await mapWithConcurrency(slice, 4, async (roundId) => getRound(roundId))
+    return {
+      rounds,
+      pagination: { page, limit, total, pages },
+    }
   })
 }
 
@@ -1940,194 +1665,147 @@ export async function getCopilotContext(lookback = 1000) {
 
 export async function getTreasuryStats() {
   return withCache('treasury-stats', HEAVY_ROUTE_CACHE_TTL_MS, async () => {
-    return preferIndexed(
-      () => getIndexedTreasuryStats(),
-      async () => {
-        const status = await getProtocolStatus()
-        const [stats, vaultLogs, standaloneBurnLogs] = await Promise.all([
-          withRpcRetries(() => publicClient.readContract({
-            address: CONTRACTS.treasury,
-            abi: treasuryAbi,
-            functionName: 'getStats',
-          }) as Promise<[bigint, bigint, bigint, bigint]>),
-          status.currentRoundId === 0n ? Promise.resolve([]) : getVaultLogs(),
-          getStandaloneBurnLogs(),
-        ])
+    const status = await getProtocolStatus()
+    const [stats, vaultLogs, standaloneBurnLogs] = await Promise.all([
+      withRpcRetries(() => publicClient.readContract({
+        address: CONTRACTS.treasury,
+        abi: treasuryAbi,
+        functionName: 'getStats',
+      }) as Promise<[bigint, bigint, bigint, bigint]>),
+      status.currentRoundId === 0n ? Promise.resolve([]) : getVaultLogs(),
+      getStandaloneBurnLogs(),
+    ])
 
-        const totalVaultedLifetime = vaultLogs.reduce((sum, log) => (
-          sum + toBigInt(log.args.amount ?? 0n)
-        ), 0n)
-        const directBurnedLifetime = standaloneBurnLogs.reduce((sum, log) => sum + toBigInt(log.args.value), 0n)
-        const totalBurnedLifetime = stats[1] + directBurnedLifetime
+    const totalVaultedLifetime = vaultLogs.reduce((sum, log) => sum + toBigInt(log.args.amount), 0n)
+    const directBurnedLifetime = standaloneBurnLogs.reduce((sum, log) => sum + toBigInt(log.args.value), 0n)
+    const totalBurnedLifetime = stats[1] + directBurnedLifetime
 
-        return {
-          totalVaulted: totalVaultedLifetime.toString(),
-          totalVaultedFormatted: etherString(totalVaultedLifetime),
-          currentVaulted: stats[0].toString(),
-          currentVaultedFormatted: etherString(stats[0]),
-          totalBurned: totalBurnedLifetime.toString(),
-          totalBurnedFormatted: etherString(totalBurnedLifetime),
-          buybackBurned: stats[1].toString(),
-          buybackBurnedFormatted: etherString(stats[1]),
-          directBurned: directBurnedLifetime.toString(),
-          directBurnedFormatted: etherString(directBurnedLifetime),
-          totalDistributedToStakers: stats[2].toString(),
-          totalDistributedToStakersFormatted: etherString(stats[2]),
-          totalBuybacks: Number(stats[3]),
-        }
-      }
-    )
-  }, {
-    staleWhileRevalidate: true,
-    maxStaleMs: HEAVY_CACHE_MAX_STALE_MS,
+    return {
+      totalVaulted: totalVaultedLifetime.toString(),
+      totalVaultedFormatted: etherString(totalVaultedLifetime),
+      currentVaulted: stats[0].toString(),
+      currentVaultedFormatted: etherString(stats[0]),
+      totalBurned: totalBurnedLifetime.toString(),
+      totalBurnedFormatted: etherString(totalBurnedLifetime),
+      buybackBurned: stats[1].toString(),
+      buybackBurnedFormatted: etherString(stats[1]),
+      directBurned: directBurnedLifetime.toString(),
+      directBurnedFormatted: etherString(directBurnedLifetime),
+      totalDistributedToStakers: stats[2].toString(),
+      totalDistributedToStakersFormatted: etherString(stats[2]),
+      totalBuybacks: Number(stats[3]),
+    }
   })
 }
 
 export async function getBuybacks(page = 1, limit = 12) {
   return withCache(`buybacks:${page}:${limit}`, HEAVY_ROUTE_CACHE_TTL_MS, async () => {
-    return preferIndexed(() => getIndexedBuybacks(page, limit), async () => {
-      const [buybackLogs, standaloneBurnLogs] = await Promise.all([
-        getRecentBuybackLogs(),
-        getRecentStandaloneBurnLogs(),
-      ])
+    const [buybackLogs, standaloneBurnLogs] = await Promise.all([
+      getBuybackLogs(),
+      getStandaloneBurnLogs(),
+    ])
 
-      const ordered = [
-        ...buybackLogs.map((log) => ({ type: 'buyback' as const, log })),
-        ...standaloneBurnLogs.map((log) => ({ type: 'burn' as const, log })),
-      ].sort((a, b) => compareLogsDesc(a.log, b.log))
-      const total = ordered.length
-      const pages = Math.max(1, Math.ceil(total / limit))
-      const slice = ordered.slice((page - 1) * limit, page * limit)
+    const ordered = [
+      ...buybackLogs.map((log) => ({ type: 'buyback' as const, log })),
+      ...standaloneBurnLogs.map((log) => ({ type: 'burn' as const, log })),
+    ].sort((a, b) => compareLogsDesc(a.log, b.log))
+    const total = ordered.length
+    const pages = Math.max(1, Math.ceil(total / limit))
+    const slice = ordered.slice((page - 1) * limit, page * limit)
 
-      const buybacks = await Promise.all(slice.map(async ({ type, log }) => {
-        const timestampMs = await getBlockTimestampMs(getLogBlockNumber(log))
+    const buybacks = await Promise.all(slice.map(async ({ type, log }) => {
+      const timestampMs = await getBlockTimestampMs(getLogBlockNumber(log))
 
-        if (type === 'buyback') {
-          return {
-            type,
-            ethSpent: toBigInt(log.args.ethSpent).toString(),
-            ethSpentFormatted: etherString(toBigInt(log.args.ethSpent)),
-            lootReceived: toBigInt(log.args.lootReceived).toString(),
-            lootReceivedFormatted: etherString(toBigInt(log.args.lootReceived)),
-            lootBurned: toBigInt(log.args.lootBurned).toString(),
-            lootBurnedFormatted: etherString(toBigInt(log.args.lootBurned)),
-            lootToStakers: toBigInt(log.args.lootToStakers).toString(),
-            lootToStakersFormatted: etherString(toBigInt(log.args.lootToStakers)),
-            txHash: log.transactionHash,
-            blockNumber: Number(log.blockNumber),
-            timestamp: new Date(timestampMs).toISOString(),
-            burnedBy: undefined,
-          }
-        }
-
+      if (type === 'buyback') {
         return {
           type,
-          ethSpent: null,
-          ethSpentFormatted: null,
-          lootReceived: null,
-          lootReceivedFormatted: null,
-          lootBurned: toBigInt(log.args.value).toString(),
-          lootBurnedFormatted: etherString(toBigInt(log.args.value)),
-          lootToStakers: null,
-          lootToStakersFormatted: null,
+          ethSpent: toBigInt(log.args.ethSpent).toString(),
+          ethSpentFormatted: etherString(toBigInt(log.args.ethSpent)),
+          lootReceived: toBigInt(log.args.lootReceived).toString(),
+          lootReceivedFormatted: etherString(toBigInt(log.args.lootReceived)),
+          lootBurned: toBigInt(log.args.lootBurned).toString(),
+          lootBurnedFormatted: etherString(toBigInt(log.args.lootBurned)),
+          lootToStakers: toBigInt(log.args.lootToStakers).toString(),
+          lootToStakersFormatted: etherString(toBigInt(log.args.lootToStakers)),
           txHash: log.transactionHash,
           blockNumber: Number(log.blockNumber),
           timestamp: new Date(timestampMs).toISOString(),
-          burnedBy: normalizeAddress(log.args.from),
         }
-      }))
+      }
 
       return {
-        buybacks,
-        pagination: { page, limit, total, pages },
+        type,
+        ethSpent: null,
+        ethSpentFormatted: null,
+        lootReceived: null,
+        lootReceivedFormatted: null,
+        lootBurned: toBigInt(log.args.value).toString(),
+        lootBurnedFormatted: etherString(toBigInt(log.args.value)),
+        lootToStakers: null,
+        lootToStakersFormatted: null,
+        txHash: log.transactionHash,
+        blockNumber: Number(log.blockNumber),
+        timestamp: new Date(timestampMs).toISOString(),
+        burnedBy: normalizeAddress(log.args.from),
       }
-    })
-  }, {
-    staleWhileRevalidate: true,
-    maxStaleMs: HEAVY_CACHE_MAX_STALE_MS,
+    }))
+
+    return {
+      buybacks,
+      pagination: { page, limit, total, pages },
+    }
   })
 }
 
 export async function getStakingStats() {
   return withCache('staking-stats', HEAVY_ROUTE_CACHE_TTL_MS, async () => {
-    return preferIndexed(
-      async () => {
-        const indexed = await getIndexedStakingSnapshot()
-        if (!indexed) return null
+    const [globalStats, stakeTokenBalance, price, yieldLogs] = await Promise.all([
+      withRpcRetries(() => publicClient.readContract({
+        address: CONTRACTS.staking,
+        abi: stakingAbi,
+        functionName: 'getGlobalStats',
+      }) as Promise<[bigint, bigint, bigint]>),
+      withRpcRetries(() => publicClient.readContract({
+        address: CONTRACTS.loot,
+        abi: lootAbi,
+        functionName: 'balanceOf',
+        args: [CONTRACTS.staking],
+      }) as Promise<bigint>),
+      getLootPrice(),
+      getYieldDistributedLogs(),
+    ])
 
-        const [stakeTokenBalance, price] = await Promise.all([
-          withRpcRetries(() => publicClient.readContract({
-            address: CONTRACTS.loot,
-            abi: lootAbi,
-            functionName: 'balanceOf',
-            args: [CONTRACTS.staking],
-          }) as Promise<bigint>),
-          getLootPrice(),
-        ])
+    const totalStaked = globalStats[0]
+    const tvlUsd = Number(formatEther(totalStaked)) * price.priceUsd
 
-        const totalStaked = BigInt(indexed.totalStaked)
-        const tvlUsd = Number(formatEther(totalStaked)) * price.priceUsd
-
-        return {
-          ...indexed,
-          contractLootBalance: stakeTokenBalance.toString(),
-          contractLootBalanceFormatted: etherString(stakeTokenBalance),
-          tvlUsd: tvlUsd.toFixed(2),
-        }
-      },
-      async () => {
-        const [globalStats, stakeTokenBalance, price, yieldLogs] = await Promise.all([
-          withRpcRetries(() => publicClient.readContract({
-            address: CONTRACTS.staking,
-            abi: stakingAbi,
-            functionName: 'getGlobalStats',
-          }) as Promise<[bigint, bigint, bigint]>),
-          withRpcRetries(() => publicClient.readContract({
-            address: CONTRACTS.loot,
-            abi: lootAbi,
-            functionName: 'balanceOf',
-            args: [CONTRACTS.staking],
-          }) as Promise<bigint>),
-          getLootPrice(),
-          getYieldDistributedLogs(),
-        ])
-
-        const totalStaked = globalStats[0]
-        const tvlUsd = Number(formatEther(totalStaked)) * price.priceUsd
-
-        const now = Date.now()
-        const stakingAprWindowMs = STAKING_APR_WINDOW_DAYS * 24 * 60 * 60 * 1000
-        let yieldInWindow = 0n
-        for (const log of yieldLogs) {
-          const ts = await getBlockTimestampMs(log.blockNumber)
-          if (ts >= now - stakingAprWindowMs) {
-            yieldInWindow += toBigInt(log.args.amount)
-          }
-        }
-        const apr = totalStaked > 0n
-          ? (Number(formatEther(yieldInWindow)) * (365 / STAKING_APR_WINDOW_DAYS) / Number(formatEther(totalStaked))) * 100
-          : 0
-
-        return {
-          totalStaked: totalStaked.toString(),
-          totalStakedFormatted: etherString(totalStaked),
-          totalYieldDistributed: globalStats[1].toString(),
-          totalYieldDistributedFormatted: etherString(globalStats[1]),
-          contractLootBalance: stakeTokenBalance.toString(),
-          contractLootBalanceFormatted: etherString(stakeTokenBalance),
-          apr: apr.toFixed(2),
-          tvlUsd: tvlUsd.toFixed(2),
-        }
+    const now = Date.now()
+    const stakingAprWindowMs = STAKING_APR_WINDOW_DAYS * 24 * 60 * 60 * 1000
+    let yieldInWindow = 0n
+    for (const log of yieldLogs) {
+      const ts = await getBlockTimestampMs(log.blockNumber)
+      if (ts >= now - stakingAprWindowMs) {
+        yieldInWindow += toBigInt(log.args.amount)
       }
-    )
-  }, {
-    staleWhileRevalidate: true,
-    maxStaleMs: HEAVY_CACHE_MAX_STALE_MS,
+    }
+    const apr = totalStaked > 0n
+      ? (Number(formatEther(yieldInWindow)) * (365 / STAKING_APR_WINDOW_DAYS) / Number(formatEther(totalStaked))) * 100
+      : 0
+
+    return {
+      totalStaked: totalStaked.toString(),
+      totalStakedFormatted: etherString(totalStaked),
+      totalYieldDistributed: globalStats[1].toString(),
+      totalYieldDistributedFormatted: etherString(globalStats[1]),
+      contractLootBalance: stakeTokenBalance.toString(),
+      contractLootBalanceFormatted: etherString(stakeTokenBalance),
+      apr: apr.toFixed(2),
+      tvlUsd: tvlUsd.toFixed(2),
+    }
   })
 }
 
 export async function getUserStake(address: Address) {
-  return withCache(`user-stake:${address}`, 20_000, async () => {
+  return withCache(`user-stake:${address}`, 10_000, async () => {
     const [stakeInfo, pendingRewards] = await Promise.all([
       withRpcRetries(() => publicClient.readContract({
         address: CONTRACTS.staking,
@@ -2155,14 +1833,11 @@ export async function getUserStake(address: Address) {
       lastWithdrawAt: Number(stakeInfo[5]),
       canCompound: stakeInfo[6],
     }
-  }, {
-    staleWhileRevalidate: true,
-    maxStaleMs: 2 * 60_000,
   })
 }
 
 export async function getUserRewards(address: Address) {
-  return withCache(`user-rewards:${address}`, 20_000, async () => {
+  return withCache(`user-rewards:${address}`, 2_000, async () => {
     const [pending, pendingLoot] = await Promise.all([
       withRpcRetries(() => publicClient.readContract({
         address: CONTRACTS.gridMining,
@@ -2202,16 +1877,13 @@ export async function getUserRewards(address: Address) {
       },
       uncheckpointedRound: pending[3].toString(),
     }
-  }, {
-    staleWhileRevalidate: true,
-    maxStaleMs: 2 * 60_000,
   })
 }
 
 export async function getAutoMine(address: Address) {
-  return withCache(`automine:${address}`, 20_000, async () => {
+  return withCache(`automine:${address}`, 10_000, async () => {
     const [state, progress] = await Promise.all([
-      withRpcRetries(() => publicClient.readContract({
+      publicClient.readContract({
         address: CONTRACTS.autoMiner,
         abi: autoMinerAbi,
         functionName: 'getUserState',
@@ -2234,13 +1906,13 @@ export async function getAutoMine(address: Address) {
         bigint,
         bigint,
         bigint,
-      ]>),
-      withRpcRetries(() => publicClient.readContract({
+      ]>,
+      publicClient.readContract({
         address: CONTRACTS.autoMiner,
         abi: autoMinerAbi,
         functionName: 'getConfigProgress',
         args: [address],
-      }) as Promise<[boolean, bigint, bigint, bigint, bigint]>),
+      }) as Promise<[boolean, bigint, bigint, bigint, bigint]>,
     ])
 
     const [config, lastRound, costPerRound, roundsRemaining, totalRefundable] = state
@@ -2274,443 +1946,336 @@ export async function getAutoMine(address: Address) {
         percentComplete: Number(progress[4]),
       },
     }
-  }, {
-    staleWhileRevalidate: true,
-    maxStaleMs: 2 * 60_000,
   })
 }
 
 export async function getUserHistory(address: Address, limit = 100, roundIdFilter?: bigint) {
   const roundKey = roundIdFilter ? roundIdFilter.toString() : 'all'
   return withCache(`user-history:${address}:${limit}:${roundKey}`, 30_000, async () => {
-    return preferIndexed(
-      () => getIndexedUserHistory(address, limit, roundIdFilter),
-      async () => {
-        const safeLimit = Math.max(1, Math.min(limit, USER_HISTORY_MAX_LIMIT))
-        const status = await getProtocolStatus()
-        if (!status.gameStarted || status.currentRoundId === 0n) {
-          return {
-            history: [],
-            totals: {
-              totalETHWonFormatted: '0',
-              totalLOOTWonFormatted: '0',
-              totalETHDeployedFormatted: '0',
-              totalPNL: '0',
-              roundsPlayed: 0,
-              roundsWon: 0,
-            },
-          }
-        }
-
-        const minRoundId = getChainFallbackMinSettledRound(status.currentRoundId)
-        if (roundIdFilter && roundIdFilter < minRoundId) {
-          return {
-            history: [],
-            totals: {
-              totalETHWonFormatted: '0',
-              totalLOOTWonFormatted: '0',
-              totalETHDeployedFormatted: '0',
-              totalPNL: '0',
-              roundsPlayed: 0,
-              roundsWon: 0,
-            },
-          }
-        }
-
-        const ordered = (await getRecentDeploymentLogsForUser(address))
-          .filter((log) => toBigInt(log.args.roundId) >= minRoundId)
-          .filter((log) => !roundIdFilter || toBigInt(log.args.roundId) === roundIdFilter)
-          .sort((a, b) => compareLogsDesc(a, b))
-          .slice(0, safeLimit)
-
-        const roundCache = new Map<bigint, Promise<Awaited<ReturnType<typeof getRound>>>>()
-        const minerCache = new Map<bigint, Promise<Awaited<ReturnType<typeof getRoundMiners>>>>()
-        const loadRound = (roundId: bigint) => {
-          const cached = roundCache.get(roundId)
-          if (cached) return cached
-          const promise = getRound(roundId)
-          roundCache.set(roundId, promise)
-          return promise
-        }
-        const loadRoundMiners = (roundId: bigint) => {
-          const cached = minerCache.get(roundId)
-          if (cached) return cached
-          const promise = getRoundMiners(roundId)
-          minerCache.set(roundId, promise)
-          return promise
-        }
-
-        const history = (await mapWithConcurrency(ordered, USER_HISTORY_CONCURRENCY, async (log) => {
-          try {
-            const roundId = toBigInt(log.args.roundId)
-            const [round, miners, timestamp] = await Promise.all([
-              loadRound(roundId),
-              loadRoundMiners(roundId),
-              getBlockTimestampMs(getLogBlockNumber(log)),
-            ])
-            const blockMask = toBigInt(log.args.blockMask)
-            const totalAmount = toBigInt(log.args.totalAmount)
-            const wonWinningBlock = decodeBlockMask(blockMask).includes(round.winningBlock)
-            const userMiner = miners.miners.find((miner) => safeAddressEq(miner.address, address))
-            const ethWon = userMiner ? BigInt(userMiner.ethReward) : 0n
-            const lootWon = userMiner ? BigInt(userMiner.lootReward) : 0n
-            const pnl = Number(formatEther(ethWon)) - Number(formatEther(totalAmount))
-
-            return {
-              roundId: Number(roundId),
-              totalAmount: totalAmount.toString(),
-              blockMask: blockMask.toString(),
-              txHash: log.transactionHash,
-              isAutoMine: log.eventName === 'DeployedFor',
-              timestamp: new Date(timestamp).toISOString(),
-              roundResult: {
-                settled: true,
-                wonWinningBlock,
-                lootpotHit: BigInt(round.lootpotAmount) > 0n,
-                winningBlock: round.winningBlock,
-                ethWon: ethWon.toString(),
-                ethWonFormatted: etherString(ethWon),
-                lootWon: lootWon.toString(),
-                lootWonFormatted: etherString(lootWon),
-                pnl: pnl.toString(),
-              },
-            }
-          } catch (error) {
-            const message = error instanceof Error ? error.message : String(error)
-            console.warn(`[user-history] skipped ${log.transactionHash} for ${address}: ${message}`)
-            return null
-          }
-        })).filter((entry) => entry !== null)
-
-        const totals = history.reduce((acc, entry) => {
-          acc.totalETHWon += BigInt(entry.roundResult.ethWon)
-          acc.totalLOOTWon += BigInt(entry.roundResult.lootWon)
-          acc.totalETHDeployed += BigInt(entry.totalAmount)
-          acc.totalPNL += Number(entry.roundResult.pnl)
-          if (entry.roundResult.wonWinningBlock) acc.roundsWon += 1
-          return acc
-        }, {
-          totalETHWon: 0n,
-          totalLOOTWon: 0n,
-          totalETHDeployed: 0n,
-          totalPNL: 0,
+    const safeLimit = Math.max(1, Math.min(limit, USER_HISTORY_MAX_LIMIT))
+    const status = await getProtocolStatus()
+    if (!status.gameStarted || status.currentRoundId === 0n) {
+      return {
+        history: [],
+        totals: {
+          totalETHWonFormatted: '0',
+          totalLOOTWonFormatted: '0',
+          totalETHDeployedFormatted: '0',
+          totalPNL: '0',
+          roundsPlayed: 0,
           roundsWon: 0,
-        })
+        },
+      }
+    }
+
+    const ordered = (await getAllDeploymentLogs())
+      .filter((log) => safeAddressEq(log.args.user, address) && (!roundIdFilter || toBigInt(log.args.roundId) === roundIdFilter))
+      .sort((a, b) =>
+      compareLogsDesc(a, b)
+    )
+      .slice(0, safeLimit)
+
+    const roundCache = new Map<bigint, Promise<Awaited<ReturnType<typeof getRound>>>>()
+    const minerCache = new Map<bigint, Promise<Awaited<ReturnType<typeof getRoundMiners>>>>()
+    const loadRound = (roundId: bigint) => {
+      const cached = roundCache.get(roundId)
+      if (cached) return cached
+      const promise = getRound(roundId)
+      roundCache.set(roundId, promise)
+      return promise
+    }
+    const loadRoundMiners = (roundId: bigint) => {
+      const cached = minerCache.get(roundId)
+      if (cached) return cached
+      const promise = getRoundMiners(roundId)
+      minerCache.set(roundId, promise)
+      return promise
+    }
+
+    const history = (await mapWithConcurrency(ordered, USER_HISTORY_CONCURRENCY, async (log) => {
+      try {
+        const roundId = toBigInt(log.args.roundId)
+        const [round, miners, timestamp] = await Promise.all([
+          loadRound(roundId),
+          loadRoundMiners(roundId),
+          getBlockTimestampMs(getLogBlockNumber(log)),
+        ])
+        const blockMask = toBigInt(log.args.blockMask)
+        const totalAmount = toBigInt(log.args.totalAmount)
+        const wonWinningBlock = decodeBlockMask(blockMask).includes(round.winningBlock)
+        const userMiner = miners.miners.find((miner) => safeAddressEq(miner.address, address))
+        const ethWon = userMiner ? BigInt(userMiner.ethReward) : 0n
+        const lootWon = userMiner ? BigInt(userMiner.lootReward) : 0n
+        const pnl = Number(formatEther(ethWon)) - Number(formatEther(totalAmount))
 
         return {
-          history,
-          totals: {
-            totalETHWonFormatted: etherString(totals.totalETHWon),
-            totalLOOTWonFormatted: etherString(totals.totalLOOTWon),
-            totalETHDeployedFormatted: etherString(totals.totalETHDeployed),
-            totalPNL: totals.totalPNL.toString(),
-            roundsPlayed: history.length,
-            roundsWon: totals.roundsWon,
+          roundId: Number(roundId),
+          totalAmount: totalAmount.toString(),
+          blockMask: blockMask.toString(),
+          txHash: log.transactionHash,
+          isAutoMine: log.eventName === 'DeployedFor',
+          timestamp: new Date(timestamp).toISOString(),
+          roundResult: {
+            settled: true,
+            wonWinningBlock,
+            lootpotHit: BigInt(round.lootpotAmount) > 0n,
+            winningBlock: round.winningBlock,
+            ethWon: ethWon.toString(),
+            ethWonFormatted: etherString(ethWon),
+            lootWon: lootWon.toString(),
+            lootWonFormatted: etherString(lootWon),
+            pnl: pnl.toString(),
           },
         }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        console.warn(`[user-history] skipped ${log.transactionHash} for ${address}: ${message}`)
+        return null
       }
-    )
+    })).filter((entry) => entry !== null)
+
+    const totals = history.reduce((acc, entry) => {
+      acc.totalETHWon += BigInt(entry.roundResult.ethWon)
+      acc.totalLOOTWon += BigInt(entry.roundResult.lootWon)
+      acc.totalETHDeployed += BigInt(entry.totalAmount)
+      acc.totalPNL += Number(entry.roundResult.pnl)
+      if (entry.roundResult.wonWinningBlock) acc.roundsWon += 1
+      return acc
+    }, {
+      totalETHWon: 0n,
+      totalLOOTWon: 0n,
+      totalETHDeployed: 0n,
+      totalPNL: 0,
+      roundsWon: 0,
+    })
+
+    return {
+      history,
+      totals: {
+        totalETHWonFormatted: etherString(totals.totalETHWon),
+        totalLOOTWonFormatted: etherString(totals.totalLOOTWon),
+        totalETHDeployedFormatted: etherString(totals.totalETHDeployed),
+        totalPNL: totals.totalPNL.toString(),
+        roundsPlayed: history.length,
+        roundsWon: totals.roundsWon,
+      },
+    }
   })
 }
 
 export async function getLockStats() {
   return withCache('lock-stats', HEAVY_ROUTE_CACHE_TTL_MS, async () => {
-    return preferIndexed(
-      async () => {
-        const indexed = await getIndexedLockSnapshot()
-        if (!indexed) return null
+    const [totalLockedResult, totalWeightResult, totalNotifiedResult, totalClaimedResult, snapshotResult] = await Promise.allSettled([
+      withRpcRetries(() => publicClient.readContract({
+        address: CONTRACTS.lootLocker,
+        abi: LOOT_LOCKER_READ_ABI,
+        functionName: 'totalLocked',
+      }) as Promise<bigint>),
+      withRpcRetries(() => publicClient.readContract({
+        address: CONTRACTS.lootLocker,
+        abi: LOOT_LOCKER_READ_ABI,
+        functionName: 'totalWeight',
+      }) as Promise<bigint>),
+      withRpcRetries(() => publicClient.readContract({
+        address: CONTRACTS.lockerRewards,
+        abi: LOCKER_REWARDS_READ_ABI,
+        functionName: 'totalNotified',
+      }) as Promise<bigint>),
+      withRpcRetries(() => publicClient.readContract({
+        address: CONTRACTS.lockerRewards,
+        abi: LOCKER_REWARDS_READ_ABI,
+        functionName: 'totalClaimed',
+      }) as Promise<bigint>),
+      getLockerSnapshot(),
+    ])
 
-        const [totalClaimedResult, price] = await Promise.all([
-          withRpcRetries(() => publicClient.readContract({
-            address: CONTRACTS.lockerRewards,
-            abi: LOCKER_REWARDS_READ_ABI,
-            functionName: 'totalClaimed',
-          }) as Promise<bigint>).catch(() => 0n),
-          getLootPrice(),
-        ])
-        const totalLocked = BigInt(indexed.protocolLocked)
-        const distributedInWindow = BigInt(indexed.distributedInWindow)
-        const lootPriceNative = Number(price.payload.loot.priceNative ?? 0)
-        const tvlEth = Number(formatEther(totalLocked)) * lootPriceNative
-        const apr = tvlEth > 0
-          ? (Number(formatEther(distributedInWindow)) * (365 / LOCK_APR_WINDOW_DAYS) / tvlEth) * 100
-          : 0
+    const totalLocked = totalLockedResult.status === 'fulfilled' ? totalLockedResult.value : 0n
+    const totalWeight = totalWeightResult.status === 'fulfilled' ? totalWeightResult.value : 0n
+    const totalNotified = totalNotifiedResult.status === 'fulfilled' ? totalNotifiedResult.value : 0n
+    const totalClaimed = totalClaimedResult.status === 'fulfilled' ? totalClaimedResult.value : 0n
+    const snapshot = snapshotResult.status === 'fulfilled'
+      ? snapshotResult.value
+      : { userLocked: new Map<string, bigint>(), userWeight: new Map<string, bigint>() }
 
-        return {
-          ...indexed,
-          totalClaimed: totalClaimedResult.toString(),
-          totalClaimedFormatted: etherString(totalClaimedResult),
-          apr: apr.toFixed(2),
-        }
-      },
-      async () => {
-        const [totalLockedResult, totalWeightResult, totalNotifiedResult, totalClaimedResult, snapshotResult, priceResult, rewardLogsResult] = await Promise.allSettled([
-          withRpcRetries(() => publicClient.readContract({
-            address: CONTRACTS.lootLocker,
-            abi: LOOT_LOCKER_READ_ABI,
-            functionName: 'totalLocked',
-          }) as Promise<bigint>),
-          withRpcRetries(() => publicClient.readContract({
-            address: CONTRACTS.lootLocker,
-            abi: LOOT_LOCKER_READ_ABI,
-            functionName: 'totalWeight',
-          }) as Promise<bigint>),
-          withRpcRetries(() => publicClient.readContract({
-            address: CONTRACTS.lockerRewards,
-            abi: LOCKER_REWARDS_READ_ABI,
-            functionName: 'totalNotified',
-          }) as Promise<bigint>),
-          withRpcRetries(() => publicClient.readContract({
-            address: CONTRACTS.lockerRewards,
-            abi: LOCKER_REWARDS_READ_ABI,
-            functionName: 'totalClaimed',
-          }) as Promise<bigint>),
-          getLockerSnapshot(),
-          getLootPrice(),
-          getRecentLockRewardNotifiedLogs(),
-        ])
+    const lockers = [...snapshot.userLocked.entries()].filter(([, locked]) => locked > 0n).length
 
-        const totalLocked = totalLockedResult.status === 'fulfilled' ? totalLockedResult.value : 0n
-        const totalWeight = totalWeightResult.status === 'fulfilled' ? totalWeightResult.value : 0n
-        const totalNotified = totalNotifiedResult.status === 'fulfilled' ? totalNotifiedResult.value : 0n
-        const totalClaimed = totalClaimedResult.status === 'fulfilled' ? totalClaimedResult.value : 0n
-        const snapshot = snapshotResult.status === 'fulfilled'
-          ? snapshotResult.value
-          : { userLocked: new Map<string, bigint>(), userWeight: new Map<string, bigint>() }
-        const price = priceResult.status === 'fulfilled' ? priceResult.value : emptyPricePayload()
-        const rewardLogs = rewardLogsResult.status === 'fulfilled' ? rewardLogsResult.value : []
-
-        const lockers = [...snapshot.userLocked.entries()].filter(([, locked]) => locked > 0n).length
-        const now = Date.now()
-        const lockAprWindowMs = LOCK_APR_WINDOW_DAYS * 24 * 60 * 60 * 1000
-        let distributedInWindow = 0n
-        for (const log of rewardLogs) {
-          const ts = await getBlockTimestampMs(getLogBlockNumber(log))
-          if (ts >= now - lockAprWindowMs) {
-            distributedInWindow += toBigInt(log.args.distributedAmount)
-          }
-        }
-        const lootPriceNative = Number(price.payload.loot.priceNative ?? 0)
-        const tvlEth = Number(formatEther(totalLocked)) * lootPriceNative
-        const apr = tvlEth > 0
-          ? (Number(formatEther(distributedInWindow)) * (365 / LOCK_APR_WINDOW_DAYS) / tvlEth) * 100
-          : 0
-
-        return {
-          protocolLocked: totalLocked.toString(),
-          protocolLockedFormatted: etherString(totalLocked),
-          protocolWeight: totalWeight.toString(),
-          protocolWeightFormatted: etherString(totalWeight),
-          totalNotified: totalNotified.toString(),
-          totalNotifiedFormatted: etherString(totalNotified),
-          totalClaimed: totalClaimed.toString(),
-          totalClaimedFormatted: etherString(totalClaimed),
-          apr: apr.toFixed(2),
-          lockers,
-        }
-      }
-    )
-  }, {
-    staleWhileRevalidate: true,
-    maxStaleMs: HEAVY_CACHE_MAX_STALE_MS,
+    return {
+      protocolLocked: totalLocked.toString(),
+      protocolLockedFormatted: etherString(totalLocked),
+      protocolWeight: totalWeight.toString(),
+      protocolWeightFormatted: etherString(totalWeight),
+      totalNotified: totalNotified.toString(),
+      totalNotifiedFormatted: etherString(totalNotified),
+      totalClaimed: totalClaimed.toString(),
+      totalClaimedFormatted: etherString(totalClaimed),
+      lockers,
+    }
   })
 }
 
 export async function getLockDistributions(page = 1, limit = 12) {
   return withCache(`lock-distributions:${page}:${limit}`, HEAVY_ROUTE_CACHE_TTL_MS, async () => {
-    return preferIndexed(
-      () => getIndexedLockDistributions(page, limit),
-      async () => {
-        const safePage = Number.isFinite(page) ? Math.max(1, Math.floor(page)) : 1
-        const safeLimit = Number.isFinite(limit) ? Math.max(1, Math.min(Math.floor(limit), 100)) : 12
+    const safePage = Number.isFinite(page) ? Math.max(1, Math.floor(page)) : 1
+    const safeLimit = Number.isFinite(limit) ? Math.max(1, Math.min(Math.floor(limit), 100)) : 12
 
-        const [logs, snapshot] = await Promise.all([
-          getRecentLockRewardNotifiedLogs(),
-          getLockerSnapshot(),
-        ])
+    const [logs, snapshot] = await Promise.all([
+      getLockRewardNotifiedLogs(),
+      getLockerSnapshot(),
+    ])
 
-        const ordered = [...logs].sort(compareLogsDesc)
-        const total = ordered.length
-        const pages = Math.max(1, Math.ceil(total / safeLimit))
-        const slice = ordered.slice((safePage - 1) * safeLimit, safePage * safeLimit)
+    const ordered = [...logs].sort(compareLogsDesc)
+    const total = ordered.length
+    const pages = Math.max(1, Math.ceil(total / safeLimit))
+    const slice = ordered.slice((safePage - 1) * safeLimit, safePage * safeLimit)
 
-        const lockers = [...snapshot.userLocked.values()].filter((locked) => locked > 0n).length
-        const lockedSupply = [...snapshot.userLocked.values()].reduce((sum, locked) => sum + locked, 0n)
+    const lockers = [...snapshot.userLocked.values()].filter((locked) => locked > 0n).length
+    const lockedSupply = [...snapshot.userLocked.values()].reduce((sum, locked) => sum + locked, 0n)
 
-        const distributions = await Promise.all(
-          slice.map(async (log) => {
-            const timestampMs = await getBlockTimestampMs(getLogBlockNumber(log))
-            const amount = toBigInt(log.args.amount)
-            const distributedAmount = toBigInt(log.args.distributedAmount)
-            const unallocatedAmount = toBigInt(log.args.unallocatedAmount)
-
-            return {
-              time: relativeTime(timestampMs),
-              timestamp: new Date(timestampMs).toISOString(),
-              amount: amount.toString(),
-              amountFormatted: etherString(amount),
-              ethDistributed: distributedAmount.toString(),
-              ethDistributedFormatted: etherString(distributedAmount),
-              unallocatedAmount: unallocatedAmount.toString(),
-              unallocatedAmountFormatted: etherString(unallocatedAmount),
-              lockers,
-              lockedSupply: lockedSupply.toString(),
-              lockedSupplyFormatted: etherString(lockedSupply),
-              txHash: log.transactionHash,
-              blockNumber: Number(getLogBlockNumber(log)),
-            }
-          })
-        )
+    const distributions = await Promise.all(
+      slice.map(async (log) => {
+        const timestampMs = await getBlockTimestampMs(getLogBlockNumber(log))
+        const amount = toBigInt(log.args.amount)
+        const distributedAmount = toBigInt(log.args.distributedAmount)
+        const unallocatedAmount = toBigInt(log.args.unallocatedAmount)
 
         return {
-          distributions,
-          pagination: {
-            page: safePage,
-            limit: safeLimit,
-            total,
-            pages,
-          },
+          time: relativeTime(timestampMs),
+          timestamp: new Date(timestampMs).toISOString(),
+          amount: amount.toString(),
+          amountFormatted: etherString(amount),
+          ethDistributed: distributedAmount.toString(),
+          ethDistributedFormatted: etherString(distributedAmount),
+          unallocatedAmount: unallocatedAmount.toString(),
+          unallocatedAmountFormatted: etherString(unallocatedAmount),
+          lockers,
+          lockedSupply: lockedSupply.toString(),
+          lockedSupplyFormatted: etherString(lockedSupply),
+          txHash: log.transactionHash,
+          blockNumber: Number(getLogBlockNumber(log)),
         }
-      }
+      })
     )
-  }, {
-    staleWhileRevalidate: true,
-    maxStaleMs: HEAVY_CACHE_MAX_STALE_MS,
+
+    return {
+      distributions,
+      pagination: {
+        page: safePage,
+        limit: safeLimit,
+        total,
+        pages,
+      },
+    }
   })
 }
 
 export async function getLeaderboardLockers(limit = 12) {
   return withCache(`leaderboard-lockers:${limit}`, HEAVY_ROUTE_CACHE_TTL_MS, async () => {
-    return preferIndexed(() => getIndexedLeaderboardLockers(limit), async () => {
-      const snapshot = await getLockerSnapshot()
-      const lockers = [...snapshot.userLocked.entries()]
-        .filter(([, locked]) => locked > 0n)
-        .sort((a, b) => (b[1] > a[1] ? 1 : -1))
-        .slice(0, limit)
-        .map(([address, locked]) => {
-          const weight = snapshot.userWeight.get(address) ?? 0n
-          return {
-            address,
-            locked: locked.toString(),
-            lockedFormatted: etherString(locked),
-            weight: weight.toString(),
-            weightFormatted: etherString(weight),
-          }
-        })
+    const snapshot = await getLockerSnapshot()
+    const lockers = [...snapshot.userLocked.entries()]
+      .filter(([, locked]) => locked > 0n)
+      .sort((a, b) => (b[1] > a[1] ? 1 : -1))
+      .slice(0, limit)
+      .map(([address, locked]) => {
+        const weight = snapshot.userWeight.get(address) ?? 0n
+        return {
+          address,
+          locked: locked.toString(),
+          lockedFormatted: etherString(locked),
+          weight: weight.toString(),
+          weightFormatted: etherString(weight),
+        }
+      })
 
-      return { lockers }
-    })
-  }, {
-    staleWhileRevalidate: true,
-    maxStaleMs: HEAVY_CACHE_MAX_STALE_MS,
+    return { lockers }
   })
 }
 
 export async function getLeaderboardMiners(limit = 12) {
   return withCache(`leaderboard-miners:${limit}`, HEAVY_ROUTE_CACHE_TTL_MS, async () => {
-    return preferIndexed(() => getIndexedLeaderboardMiners(limit), async () => {
-      const status = await getProtocolStatus()
-      if (!status.gameStarted || status.currentRoundId === 0n) {
-        return { period: 'recent', miners: [], deployers: [] }
-      }
+    const status = await getProtocolStatus()
+    if (!status.gameStarted || status.currentRoundId === 0n) {
+      return { period: 'all', miners: [], deployers: [] }
+    }
 
-      const snapshot = await getRecentDeploymentTotals(CHAIN_FALLBACK_HISTORY_LOOKBACK_BLOCKS)
-      const deployers = [...snapshot.totalsByUser.entries()]
-          .sort((a, b) => (b[1] > a[1] ? 1 : -1))
-          .slice(0, limit)
-          .map(([address, totalDeployed]) => ({
-            address,
-            totalDeployed: totalDeployed.toString(),
-            totalDeployedFormatted: etherString(totalDeployed),
-            roundsPlayed: 0,
-          }))
+    const snapshot = await getDeploymentSnapshot()
+    const deployers = [...snapshot.totalsByUser.entries()]
+        .sort((a, b) => (b[1] > a[1] ? 1 : -1))
+        .slice(0, limit)
+        .map(([address, totalDeployed]) => ({
+          address,
+          totalDeployed: totalDeployed.toString(),
+          totalDeployedFormatted: etherString(totalDeployed),
+          roundsPlayed: 0,
+        }))
 
-      return {
-        period: 'recent',
-        miners: deployers,
-        deployers,
-      }
-    })
-  }, {
-    staleWhileRevalidate: true,
-    maxStaleMs: HEAVY_CACHE_MAX_STALE_MS,
+    return {
+      period: 'all',
+      miners: deployers,
+      deployers,
+    }
   })
 }
 
 export async function getLeaderboardStakers(limit = 12) {
   return withCache(`leaderboard-stakers:${limit}`, HEAVY_ROUTE_CACHE_TTL_MS, async () => {
-    return preferIndexed(() => getIndexedLeaderboardStakers(limit), async () => {
-      const snapshot = await getStakeSnapshot()
-      const stakers = [...snapshot.balances.entries()]
-          .filter(([, balance]) => balance > 0n)
-          .sort((a, b) => (b[1] > a[1] ? 1 : -1))
-          .slice(0, limit)
-          .map(([address, balance]) => ({
-            address,
-            balance: balance.toString(),
-            balanceFormatted: etherString(balance),
-            stakedBalance: balance.toString(),
-            stakedBalanceFormatted: etherString(balance),
-          }))
+    const snapshot = await getStakeSnapshot()
+    const stakers = [...snapshot.balances.entries()]
+        .filter(([, balance]) => balance > 0n)
+        .sort((a, b) => (b[1] > a[1] ? 1 : -1))
+        .slice(0, limit)
+        .map(([address, balance]) => ({
+          address,
+          balance: balance.toString(),
+          balanceFormatted: etherString(balance),
+          stakedBalance: balance.toString(),
+          stakedBalanceFormatted: etherString(balance),
+        }))
 
-      return { stakers }
-    })
-  }, {
-    staleWhileRevalidate: true,
-    maxStaleMs: HEAVY_CACHE_MAX_STALE_MS,
+    return { stakers }
   })
 }
 
 export async function getLeaderboardEarners(limit = 12) {
   return withCache(`leaderboard-earners:${limit}`, HEAVY_ROUTE_CACHE_TTL_MS, async () => {
-    return preferIndexed(() => getIndexedLeaderboardEarners(limit), async () => {
-      const status = await getProtocolStatus()
-      if (!status.gameStarted || status.currentRoundId === 0n) {
-        return {
-          earners: [],
-          pagination: { page: 1, limit, total: 0, pages: 1 },
-        }
-      }
-
-      const checkpointLogs = await getRecentCheckpointLogs(CHAIN_FALLBACK_HISTORY_LOOKBACK_BLOCKS)
-      const users = [...new Set(
-        [...checkpointLogs]
-          .sort(compareLogsDesc)
-          .map((log) => normalizeAddress(log.args.user))
-      )].slice(0, Math.max(limit * 4, 48))
-      const rewards = (await mapWithConcurrency(users, LEADERBOARD_EARNERS_CONCURRENCY, async (address) => {
-        try {
-          return {
-            address,
-            rewards: await getUserRewards(address),
-          }
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error)
-          console.warn(`[leaderboard-earners] skipped ${address}: ${message}`)
-          return null
-        }
-      })).filter((entry) => entry !== null)
-
-      const earners = rewards
-          .map(({ address, rewards }) => ({
-            address,
-            unforged: rewards.pendingLOOT.unforged,
-            unforgedFormatted: rewards.pendingLOOT.unforgedFormatted,
-            gross: rewards.pendingLOOT.gross,
-            grossFormatted: rewards.pendingLOOT.grossFormatted,
-          }))
-          .filter((item) => BigInt(item.unforged) > 0n)
-          .sort((a, b) => (BigInt(b.unforged) > BigInt(a.unforged) ? 1 : -1))
-          .slice(0, limit)
-
+    const status = await getProtocolStatus()
+    if (!status.gameStarted || status.currentRoundId === 0n) {
       return {
-        earners,
-        pagination: { page: 1, limit, total: earners.length, pages: 1 },
+        earners: [],
+        pagination: { page: 1, limit, total: 0, pages: 1 },
       }
-    })
-  }, {
-    staleWhileRevalidate: true,
-    maxStaleMs: HEAVY_CACHE_MAX_STALE_MS,
+    }
+
+    const checkpointLogs = await getCheckpointLogs()
+    const users = [...new Set(checkpointLogs.map((log) => normalizeAddress(log.args.user)))]
+    const rewards = (await mapWithConcurrency(users, LEADERBOARD_EARNERS_CONCURRENCY, async (address) => {
+      try {
+        return {
+          address,
+          rewards: await getUserRewards(address),
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        console.warn(`[leaderboard-earners] skipped ${address}: ${message}`)
+        return null
+      }
+    })).filter((entry) => entry !== null)
+
+    const earners = rewards
+        .map(({ address, rewards }) => ({
+          address,
+          unforged: rewards.pendingLOOT.unforged,
+          unforgedFormatted: rewards.pendingLOOT.unforgedFormatted,
+          gross: rewards.pendingLOOT.gross,
+          grossFormatted: rewards.pendingLOOT.grossFormatted,
+        }))
+        .filter((item) => BigInt(item.unforged) > 0n)
+        .sort((a, b) => (BigInt(b.unforged) > BigInt(a.unforged) ? 1 : -1))
+        .slice(0, limit)
+
+    return {
+      earners,
+      pagination: { page: 1, limit, total: earners.length, pages: 1 },
+    }
   })
 }
 
@@ -2798,67 +2363,206 @@ export async function getLeaderboardTreasury(limit = 12) {
   })
 }
 
-export async function warmProtocolCaches() {
-  const tasks: Array<() => Promise<unknown>> = [
-    () => getProtocolStatus(),
-    () => getRoundSettledLogs(),
-    () => getRecentRoundSettledLogs(),
-    () => getStakeSnapshot(),
-    () => getLockerSnapshot(),
-    () => getLockRewardNotifiedLogs(),
-    () => getStats(),
-    () => getRounds(1, 12, false),
-    () => getLeaderboardMiners(12),
-    () => getLeaderboardEarners(12),
-    () => getLeaderboardStakers(12),
-    () => getLeaderboardLockers(12),
-    () => getLeaderboardTreasury(12),
-    () => getLockDistributions(1, 12),
-    () => getLockStats(),
-  ]
+export async function getTreasuryHoldings() {
+  return withCache('treasury-holdings', HEAVY_ROUTE_CACHE_TTL_MS, async () => {
+    const config = await getTreasuryAgentConfig()
+    const startBlock = await getTreasuryAgentStartBlock()
 
-  for (const task of tasks) {
-    try {
-      await task()
-    } catch (error) {
-      console.warn(`[cache-warmer] warm task failed: ${error instanceof Error ? error.message : String(error)}`)
+    const [nativeBalance, incomingLogs, outgoingLogs] = await Promise.all([
+      withRpcRetries(() => publicClient.getBalance({ address: config.multisig })),
+      getCachedLogsPaged('treasury-agent:wallet-transfers-in', HEAVY_ROUTE_CACHE_TTL_MS, {
+        event: TRANSFER_EVENT,
+        args: { to: config.multisig },
+        fromBlock: startBlock,
+      }),
+      getCachedLogsPaged('treasury-agent:wallet-transfers-out', HEAVY_ROUTE_CACHE_TTL_MS, {
+        event: TRANSFER_EVENT,
+        args: { from: config.multisig },
+        fromBlock: startBlock,
+      }),
+    ])
+
+    const candidateAddresses = new Set<Address>([
+      config.asset,
+      config.loot,
+      BASE_WETH,
+    ])
+
+    for (const log of incomingLogs) {
+      candidateAddresses.add(normalizeAddress(log.address))
     }
-  }
+
+    for (const log of outgoingLogs) {
+      candidateAddresses.add(normalizeAddress(log.address))
+    }
+
+    const tokens = (await mapWithConcurrency([...candidateAddresses], 6, async (address) => {
+      try {
+        const [balance, symbol, name, decimals] = await Promise.all([
+          withRpcRetries(() => publicClient.readContract({
+            address,
+            abi: ERC20_READ_ABI,
+            functionName: 'balanceOf',
+            args: [config.multisig],
+          }) as Promise<bigint>),
+          withRpcRetries(() => publicClient.readContract({
+            address,
+            abi: ERC20_READ_ABI,
+            functionName: 'symbol',
+          }) as Promise<string>),
+          withRpcRetries(() => publicClient.readContract({
+            address,
+            abi: ERC20_READ_ABI,
+            functionName: 'name',
+          }) as Promise<string>),
+          withRpcRetries(() => publicClient.readContract({
+            address,
+            abi: ERC20_READ_ABI,
+            functionName: 'decimals',
+          }) as Promise<number>),
+        ])
+
+        if (balance <= 0n) {
+          return null
+        }
+
+        return {
+          address,
+          balance,
+          symbol,
+          name,
+          decimals: Number(decimals),
+        }
+      } catch {
+        return null
+      }
+    })).filter((entry): entry is {
+      address: Address
+      balance: bigint
+      symbol: string
+      name: string
+      decimals: number
+    } => Boolean(entry))
+
+    const priorityAddresses = new Set([
+      config.asset.toLowerCase(),
+      config.loot.toLowerCase(),
+      BASE_WETH.toLowerCase(),
+    ])
+
+    const tokenEntries = await Promise.all(tokens.map(async (token) => {
+      const meta = await getCoinGeckoTokenMeta(token.address)
+
+      if (!meta.logoUrl && !priorityAddresses.has(token.address.toLowerCase())) {
+        return null
+      }
+
+      return {
+        symbol: meta.symbol ?? token.symbol,
+        name: meta.name ?? token.name,
+        address: token.address,
+        balance: formatTokenAmount(token.balance, token.decimals),
+        balanceFormatted: formatTokenBalance(token.balance, token.decimals),
+        decimals: token.decimals,
+        logoUrl: meta.logoUrl,
+        coingeckoUrl: meta.coingeckoUrl,
+        isNative: false,
+      } satisfies TreasuryHoldingEntry
+    }))
+
+    const entries: TreasuryHoldingEntry[] = tokenEntries.filter(Boolean) as TreasuryHoldingEntry[]
+
+    if (nativeBalance > 0n) {
+      const nativeMeta = await getCoinGeckoTokenMeta(null, true)
+      entries.push({
+        symbol: nativeMeta.symbol ?? 'ETH',
+        name: nativeMeta.name ?? 'Ethereum',
+        address: null,
+        balance: formatTokenAmount(nativeBalance, 18),
+        balanceFormatted: formatTokenBalance(nativeBalance, 18),
+        decimals: 18,
+        logoUrl: nativeMeta.logoUrl,
+        coingeckoUrl: nativeMeta.coingeckoUrl,
+        isNative: true,
+      })
+    }
+
+    const priorityByAddress = new Map<string, number>([
+      [config.asset.toLowerCase(), 0],
+      [BASE_WETH.toLowerCase(), 2],
+      [config.loot.toLowerCase(), 3],
+    ])
+
+    entries.sort((a, b) => {
+      const aPriority = a.isNative ? 1 : priorityByAddress.get(a.address?.toLowerCase() ?? '') ?? 10
+      const bPriority = b.isNative ? 1 : priorityByAddress.get(b.address?.toLowerCase() ?? '') ?? 10
+
+      if (aPriority !== bPriority) return aPriority - bPriority
+      return a.symbol.localeCompare(b.symbol)
+    })
+
+    return {
+      walletAddress: config.multisig,
+      entries,
+    }
+  })
+}
+
+export async function warmProtocolCaches() {
+  await Promise.allSettled([
+    getProtocolStatus(),
+    getRoundSettledLogs(),
+    getRecentRoundSettledLogs(),
+    getDeploymentSnapshot(),
+    getStakeSnapshot(),
+    getCheckpointLogs(),
+    getLockerSnapshot(),
+    getLockRewardNotifiedLogs(),
+    getVaultLogs(),
+    getStandaloneBurnLogs(),
+  ])
+
+  await Promise.allSettled([
+    getStats(),
+    getRounds(1, 12, false),
+    getLeaderboardMiners(12),
+    getLeaderboardStakers(12),
+    getLeaderboardLockers(12),
+    getLeaderboardEarners(12),
+    getLeaderboardTreasury(12),
+    getLockDistributions(1, 12),
+    getLockStats(),
+  ])
 }
 
 export async function getLatestRoundTransition() {
-  return withCache('latest-round-transition', 2_000, async () => {
-    const current = await getCurrentRound()
-    const roundId = BigInt(current.roundId)
-    const previousRoundId = roundId > 1n ? roundId - 1n : 0n
-    const settledLog = previousRoundId > 0n
-      ? await getRoundSettledLogForRound(previousRoundId, false).catch(() => null)
-      : null
-    const settledAtMs = settledLog?.blockNumber ? await getBlockTimestampMs(settledLog.blockNumber).catch(() => null) : null
+  const current = await getCurrentRound()
+  const roundId = BigInt(current.roundId)
+  const previousRoundId = roundId > 1n ? roundId - 1n : 0n
+  const settledLog = previousRoundId > 0n
+    ? await getRoundSettledLogForRound(previousRoundId, true).catch(() => null)
+    : null
+  const settledAtMs = settledLog?.blockNumber ? await getBlockTimestampMs(settledLog.blockNumber).catch(() => null) : null
 
-    return {
-      settled: settledLog ? {
-        roundId: previousRoundId.toString(),
-        winningBlock: Number(settledLog.args.winningBlock).toString(),
-        topMiner: normalizeAddress(settledLog.args.topMiner),
-        totalWinnings: toBigInt(settledLog.args.totalWinnings).toString(),
-        topMinerReward: toBigInt(settledLog.args.topMinerReward).toString(),
-        lootpotAmount: toBigInt(settledLog.args.lootpotAmount).toString(),
-        isSplit: Boolean(settledLog.args.isSplit),
-        settledAt: settledAtMs ? new Date(settledAtMs).toISOString() : undefined,
-      } : null,
-      newRound: {
-        roundId: current.roundId,
-        startTime: current.startTime,
-        endTime: current.endTime,
-        lootpotPool: current.lootpotPool,
-        lootpotPoolFormatted: current.lootpotPoolFormatted,
-      },
-    }
-  }, {
-    staleWhileRevalidate: true,
-    maxStaleMs: 15_000,
-  })
+  return {
+    settled: settledLog ? {
+      roundId: previousRoundId.toString(),
+      winningBlock: Number(settledLog.args.winningBlock).toString(),
+      topMiner: normalizeAddress(settledLog.args.topMiner),
+      totalWinnings: toBigInt(settledLog.args.totalWinnings).toString(),
+      topMinerReward: toBigInt(settledLog.args.topMinerReward).toString(),
+      lootpotAmount: toBigInt(settledLog.args.lootpotAmount).toString(),
+      isSplit: Boolean(settledLog.args.isSplit),
+      settledAt: settledAtMs ? new Date(settledAtMs).toISOString() : undefined,
+    } : null,
+    newRound: {
+      roundId: current.roundId,
+      startTime: current.startTime,
+      endTime: current.endTime,
+      lootpotPool: current.lootpotPool,
+      lootpotPoolFormatted: current.lootpotPoolFormatted,
+    },
+  }
 }
 
 export function asAddress(value: string): Address {

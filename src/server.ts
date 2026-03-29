@@ -18,7 +18,6 @@ import {
   getLeaderboardLockers,
   getLeaderboardMiners,
   getLeaderboardStakers,
-  getLootPriceCached,
   getLeaderboardTreasury,
   getLockStats,
   getRound,
@@ -26,6 +25,7 @@ import {
   getRounds,
   getStakingStats,
   getStats,
+  getTreasuryHoldings,
   getTreasuryStats,
   getUserHistory,
   getUserRewards,
@@ -42,8 +42,6 @@ const app = Fastify({ logger: true })
 let lootpotWorkerStopping = false
 let lootpotWorkerTimer: NodeJS.Timeout | null = null
 let cacheWarmTimer: NodeJS.Timeout | null = null
-let cacheWarmerStopping = false
-let cacheWarmerRunning = false
 let agentStatsWorkerStopping = false
 let agentStatsWorkerTimer: NodeJS.Timeout | null = null
 const discordPriceWorker = createDiscordPriceWorker({ logger: console })
@@ -57,14 +55,16 @@ await app.register(cors, {
 app.get('/health', async () => ({ ok: true }))
 
 app.get('/api/price', async () => {
-  const price = await getLootPriceCached()
+  const stats = await getStats()
   return {
-    ...price.payload,
+    loot: stats.loot,
+    fetchedAt: stats.fetchedAt,
   }
 })
 
 app.get('/api/stats', async () => getStats())
 app.get('/api/treasury/stats', async () => getTreasuryStats())
+app.get('/api/treasury/holdings', async () => getTreasuryHoldings())
 app.get('/api/lock/stats', async () => getLockStats())
 app.get('/api/lock/distributions', async (req) => {
   const { page = '1', limit = '12' } = req.query as Record<string, string | undefined>
@@ -257,9 +257,8 @@ function stopLootpotWorker() {
 }
 
 function stopCacheWarmer() {
-  cacheWarmerStopping = true
   if (cacheWarmTimer) {
-    clearTimeout(cacheWarmTimer)
+    clearInterval(cacheWarmTimer)
     cacheWarmTimer = null
   }
 }
@@ -273,40 +272,19 @@ function stopAgentStatsWorker() {
 }
 
 function startCacheWarmer() {
-  if (!env.enableCacheWarmer) {
-    app.log.info('[cache-warmer] disabled')
-    return
-  }
-
-  cacheWarmerStopping = false
-  const schedule = (delayMs: number) => {
-    if (cacheWarmerStopping) return
-    cacheWarmTimer = setTimeout(() => {
-      void run()
-    }, delayMs)
-  }
-
   const run = async () => {
-    if (cacheWarmerStopping) return
-    if (cacheWarmerRunning) {
-      app.log.warn('[cache-warmer] previous cycle still running, skipping overlap')
-      schedule(env.cacheWarmIntervalMs)
-      return
-    }
-
-    cacheWarmerRunning = true
     try {
       await warmProtocolCaches()
       app.log.info('[cache-warmer] cycle complete')
     } catch (error) {
       app.log.error(error, '[cache-warmer] cycle failed')
-    } finally {
-      cacheWarmerRunning = false
-      schedule(env.cacheWarmIntervalMs)
     }
   }
 
-  schedule(env.cacheWarmIntervalMs)
+  void run()
+  cacheWarmTimer = setInterval(() => {
+    void run()
+  }, 45_000)
 }
 
 function startLootpotWorker() {
