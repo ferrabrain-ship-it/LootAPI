@@ -2385,10 +2385,10 @@ export async function getLeaderboardTreasury(limit = 12) {
         const claimableLoot = result[4]
         const redeemableAssets = result[5]
 
-        const depositedAssets = pendingDepositAssets + redeemableAssets
+        const depositedAssets = redeemableAssets
         const totalRewards = (claimedLootByUser.get(address) ?? 0n) + claimableLoot
 
-        if (depositedAssets <= 0n && totalRewards <= 0n) {
+        if (depositedAssets <= 0n && pendingDepositAssets <= 0n && totalRewards <= 0n) {
           return null
         }
 
@@ -2396,6 +2396,8 @@ export async function getLeaderboardTreasury(limit = 12) {
           address,
           deposited: depositedAssets.toString(),
           depositedFormatted: formatUnits(depositedAssets, 6),
+          pending: pendingDepositAssets.toString(),
+          pendingFormatted: formatUnits(pendingDepositAssets, 6),
           rewards: totalRewards.toString(),
           rewardsFormatted: formatEther(totalRewards),
         }
@@ -2404,12 +2406,16 @@ export async function getLeaderboardTreasury(limit = 12) {
         address: Address
         deposited: string
         depositedFormatted: string
+        pending: string
+        pendingFormatted: string
         rewards: string
         rewardsFormatted: string
       } => Boolean(entry))
       .sort((a, b) => {
         const depositedDiff = BigInt(b.deposited) - BigInt(a.deposited)
         if (depositedDiff !== 0n) return depositedDiff > 0n ? 1 : -1
+        const pendingDiff = BigInt(b.pending) - BigInt(a.pending)
+        if (pendingDiff !== 0n) return pendingDiff > 0n ? 1 : -1
         const rewardsDiff = BigInt(b.rewards) - BigInt(a.rewards)
         if (rewardsDiff !== 0n) return rewardsDiff > 0n ? 1 : -1
         return 0
