@@ -123,6 +123,8 @@ type TreasuryHoldingEntry = {
   address: Address | null
   balance: string
   balanceFormatted: string
+  usdValue: number
+  usdValueFormatted: string
   allocation: number
   decimals: number
   logoUrl: string | null
@@ -544,6 +546,15 @@ function formatTokenBalance(value: bigint, decimals: number) {
   })
 }
 
+function formatUsdValue(value: number) {
+  return value.toLocaleString('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    minimumFractionDigits: value >= 100 ? 0 : 2,
+    maximumFractionDigits: value >= 100 ? 0 : 2,
+  })
+}
+
 async function getTreasuryAgentStartBlock() {
   return withCache('treasury-agent:start-block', HEAVY_ROUTE_CACHE_TTL_MS, async () => {
     const deploymentBlock = await findContractDeploymentBlock(CONTRACTS.treasuryAgent)
@@ -649,12 +660,20 @@ async function getTokenPriceUsd(address: Address | null, native = false) {
         return resolvedAddress.toLowerCase() === '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913' ? 1 : 0
       }
 
-      const pairs = await response.json() as Array<{ priceUsd?: string; liquidity?: { usd?: number } }>
+      const pairs = await response.json() as Array<{
+        priceUsd?: string
+        liquidity?: { usd?: number }
+        baseToken?: { address?: string | null }
+        quoteToken?: { address?: string | null }
+      }>
       if (!Array.isArray(pairs) || pairs.length === 0) {
         return resolvedAddress.toLowerCase() === '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913' ? 1 : 0
       }
 
-      const bestPair = [...pairs].sort((a, b) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0))[0]
+      const tokenAddress = resolvedAddress.toLowerCase()
+      const candidatePairs = pairs.filter((pair) => pair.baseToken?.address?.toLowerCase() === tokenAddress)
+      const bestPair = [...(candidatePairs.length > 0 ? candidatePairs : pairs)]
+        .sort((a, b) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0))[0]
       const parsedPrice = Number.parseFloat(bestPair?.priceUsd ?? '0')
 
       return Number.isFinite(parsedPrice) && parsedPrice > 0
@@ -2514,6 +2533,8 @@ export async function getTreasuryHoldings() {
         address: token.address,
         balance: balanceFormattedRaw,
         balanceFormatted: formatTokenBalance(token.balance, token.decimals),
+        usdValue,
+        usdValueFormatted: formatUsdValue(usdValue),
         allocation: usdValue,
         decimals: token.decimals,
         logoUrl: meta.logoUrl,
@@ -2534,12 +2555,14 @@ export async function getTreasuryHoldings() {
         entries.push({
           symbol: nativeMeta.symbol ?? 'ETH',
           name: nativeMeta.name ?? 'Ethereum',
-          address: null,
-          balance: balanceFormattedRaw,
-          balanceFormatted: formatTokenBalance(nativeBalance, 18),
-          allocation: usdValue,
-          decimals: 18,
-          logoUrl: nativeMeta.logoUrl,
+        address: null,
+        balance: balanceFormattedRaw,
+        balanceFormatted: formatTokenBalance(nativeBalance, 18),
+        usdValue,
+        usdValueFormatted: formatUsdValue(usdValue),
+        allocation: usdValue,
+        decimals: 18,
+        logoUrl: nativeMeta.logoUrl,
           coingeckoUrl: nativeMeta.coingeckoUrl,
           isNative: true,
         })
