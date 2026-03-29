@@ -19,6 +19,7 @@ import {
   getLeaderboardMiners,
   getLeaderboardStakers,
   getLootPriceCached,
+  getLeaderboardTreasury,
   getLockStats,
   getRound,
   getRoundMiners,
@@ -167,6 +168,11 @@ app.get('/api/leaderboard/earners', async (req) => {
 app.get('/api/leaderboard/lockers', async (req) => {
   const { limit = '12' } = req.query as { limit?: string }
   return getLeaderboardLockers(Number(limit))
+})
+
+app.get('/api/leaderboard/treasury', async (req) => {
+  const { limit = '12' } = req.query as { limit?: string }
+  return getLeaderboardTreasury(Number(limit))
 })
 
 function startSse(reply: FastifyReply) {

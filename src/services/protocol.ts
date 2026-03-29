@@ -1,5 +1,5 @@
 import type { AbiEvent, Address, Log } from 'viem'
-import { formatEther, getAddress, isAddress, parseAbi, parseAbiItem } from 'viem'
+import { formatEther, formatUnits, getAddress, isAddress, parseAbi, parseAbiItem } from 'viem'
 import lootAbi from '../abis/Loot.json' with { type: 'json' }
 import gridMiningAbi from '../abis/GridMining.json' with { type: 'json' }
 import treasuryAbi from '../abis/Treasury.json' with { type: 'json' }
@@ -46,6 +46,10 @@ const STAKE_COMPOUND_EVENT = parseAbiItem('event YieldCompounded(address indexed
 const YIELD_DISTRIBUTED_EVENT = parseAbiItem('event YieldDistributed(uint256 amount, uint256 newAccYieldPerShare)')
 const CHECKPOINTED_EVENT = parseAbiItem('event Checkpointed(uint64 indexed roundId, address indexed user, uint256 ethReward, uint256 lootReward)')
 const CLAIMED_LOOT_EVENT = parseAbiItem('event ClaimedLOOT(address indexed user, uint256 minedLoot, uint256 forgedLoot, uint256 fee, uint256 net)')
+const TREASURY_AGENT_DEPOSIT_QUEUED_EVENT = parseAbiItem(
+  'event UserDepositQueued(address indexed caller, address indexed receiver, uint256 assets)'
+)
+const TREASURY_AGENT_LOOT_CLAIMED_EVENT = parseAbiItem('event LootClaimed(address indexed user, uint256 amount)')
 const LOCK_REWARD_NOTIFIED_EVENT = parseAbiItem(
   'event RewardNotified(uint256 amount, uint256 distributedAmount, uint256 unallocatedAmount, uint256 accRewardPerWeight)'
 )
@@ -68,6 +72,9 @@ const LOOT_LOCKER_READ_ABI = parseAbi([
 const LOCKER_REWARDS_READ_ABI = parseAbi([
   'function totalNotified() view returns (uint256)',
   'function totalClaimed() view returns (uint256)',
+])
+const TREASURY_AGENT_READ_ABI = parseAbi([
+  'function getUserPosition(address user) view returns (uint256 shares, uint256 pendingDepositAssets, uint256 pendingWithdrawShares, uint256 claimableWithdrawAssets, uint256 claimableLoot, uint256 redeemableAssets)',
 ])
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000' as Address
 
@@ -117,6 +124,7 @@ type DeploymentSnapshot = {
 type StakeSnapshot = {
   balances: Map<string, bigint>
 }
+type TreasuryAgentUserPosition = readonly [bigint, bigint, bigint, bigint, bigint, bigint]
 
 const blockTimestampCache = new Map<string, number>()
 const LOG_BLOCK_RANGE = 10_000n
@@ -319,6 +327,7 @@ async function getScanStartBlock() {
     scanStartBlockPromise = Promise.all([
       findContractDeploymentBlock(CONTRACTS.gridMining),
       findContractDeploymentBlock(CONTRACTS.treasury),
+      findContractDeploymentBlock(CONTRACTS.treasuryAgent),
       findContractDeploymentBlock(CONTRACTS.staking),
       findContractDeploymentBlock(CONTRACTS.autoMiner),
       findContractDeploymentBlock(CONTRACTS.lootLocker),
@@ -2705,6 +2714,90 @@ export async function getLeaderboardEarners(limit = 12) {
   })
 }
 
+export async function getLeaderboardTreasury(limit = 12) {
+  return withCache(`leaderboard-treasury:${limit}`, HEAVY_ROUTE_CACHE_TTL_MS, async () => {
+    const [queuedDeposits, claimedRewards] = await Promise.all([
+      getCachedLogsPaged('treasury-agent:user-deposit-queued', HEAVY_ROUTE_CACHE_TTL_MS, {
+        address: CONTRACTS.treasuryAgent,
+        event: TREASURY_AGENT_DEPOSIT_QUEUED_EVENT,
+      }),
+      getCachedLogsPaged('treasury-agent:loot-claimed', HEAVY_ROUTE_CACHE_TTL_MS, {
+        address: CONTRACTS.treasuryAgent,
+        event: TREASURY_AGENT_LOOT_CLAIMED_EVENT,
+      }),
+    ])
+
+    const claimedLootByUser = new Map<string, bigint>()
+    for (const log of claimedRewards) {
+      const user = normalizeAddress(log.args.user)
+      const amount = toBigInt(log.args.amount ?? 0n)
+      claimedLootByUser.set(user, (claimedLootByUser.get(user) ?? 0n) + amount)
+    }
+
+    const users = Array.from(new Set(
+      queuedDeposits.map((log) => normalizeAddress(log.args.receiver))
+    ))
+
+    if (users.length === 0) {
+      return { entries: [] }
+    }
+
+    const positions = await mapWithConcurrency(users, 6, async (address) => {
+      const result = await withRpcRetries(() => publicClient.readContract({
+        address: CONTRACTS.treasuryAgent,
+        abi: TREASURY_AGENT_READ_ABI,
+        functionName: 'getUserPosition',
+        args: [address],
+      }) as Promise<TreasuryAgentUserPosition>)
+
+      return { address, result }
+    })
+
+    const entries = positions
+      .map(({ address, result }) => {
+        const pendingDepositAssets = result[1]
+        const claimableLoot = result[4]
+        const redeemableAssets = result[5]
+
+        const depositedAssets = pendingDepositAssets + redeemableAssets
+        const totalRewards = (claimedLootByUser.get(address) ?? 0n) + claimableLoot
+
+        if (depositedAssets <= 0n && totalRewards <= 0n) {
+          return null
+        }
+
+        return {
+          address,
+          deposited: depositedAssets.toString(),
+          depositedFormatted: formatUnits(depositedAssets, 6),
+          rewards: totalRewards.toString(),
+          rewardsFormatted: formatEther(totalRewards),
+        }
+      })
+      .filter((entry): entry is {
+        address: Address
+        deposited: string
+        depositedFormatted: string
+        rewards: string
+        rewardsFormatted: string
+      } => Boolean(entry))
+      .sort((a, b) => {
+        const depositedDiff = BigInt(b.deposited) - BigInt(a.deposited)
+        if (depositedDiff !== 0n) return depositedDiff > 0n ? 1 : -1
+        const rewardsDiff = BigInt(b.rewards) - BigInt(a.rewards)
+        if (rewardsDiff !== 0n) return rewardsDiff > 0n ? 1 : -1
+        return 0
+      })
+      .slice(0, limit)
+      .map((entry, index) => ({
+        rank: index + 1,
+        ...entry,
+      }))
+
+    return { entries }
+  })
+}
+
 export async function warmProtocolCaches() {
   const tasks: Array<() => Promise<unknown>> = [
     () => getProtocolStatus(),
@@ -2719,6 +2812,7 @@ export async function warmProtocolCaches() {
     () => getLeaderboardEarners(12),
     () => getLeaderboardStakers(12),
     () => getLeaderboardLockers(12),
+    () => getLeaderboardTreasury(12),
     () => getLockDistributions(1, 12),
     () => getLockStats(),
   ]
