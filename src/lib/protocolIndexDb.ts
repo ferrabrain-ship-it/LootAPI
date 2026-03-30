@@ -175,6 +175,36 @@ create table if not exists protocol_locker_events (
   primary key (tx_hash, log_index)
 );
 
+create table if not exists protocol_treasury_agent_leaderboard (
+  user_address text primary key,
+  rank integer not null default 0,
+  deposited numeric(78,18) not null default 0,
+  pending numeric(78,18) not null default 0,
+  rewards numeric(78,18) not null default 0,
+  snapshot_block bigint not null default 0,
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists protocol_treasury_agent_holdings (
+  wallet_address text not null,
+  token_key text not null,
+  token_address text,
+  symbol text not null,
+  name text not null,
+  balance numeric(78,18) not null,
+  balance_formatted text not null,
+  usd_value double precision not null default 0,
+  usd_value_formatted text not null,
+  allocation double precision not null default 0,
+  decimals integer not null,
+  logo_url text,
+  coingecko_url text,
+  is_native boolean not null default false,
+  snapshot_block bigint not null default 0,
+  updated_at timestamptz not null default now(),
+  primary key (wallet_address, token_key)
+);
+
 create index if not exists idx_protocol_rounds_settled_block
   on protocol_rounds (settled_block_number desc);
 
@@ -220,6 +250,12 @@ create index if not exists idx_protocol_lock_reward_notified_block
 
 create index if not exists idx_protocol_locker_events_user_block
   on protocol_locker_events (user_address, block_number desc, log_index desc);
+
+create index if not exists idx_protocol_treasury_agent_leaderboard_rank
+  on protocol_treasury_agent_leaderboard (rank asc, deposited desc, pending desc, rewards desc);
+
+create index if not exists idx_protocol_treasury_agent_holdings_wallet_allocation
+  on protocol_treasury_agent_holdings (wallet_address, allocation desc);
 `
 
 let protocolIndexPool: Pool | null = null

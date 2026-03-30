@@ -7,6 +7,7 @@ import { env } from '../config/env.js'
 import { publicClient } from '../lib/client.js'
 import { closeProtocolIndexPool, getProtocolIndexPool, initProtocolIndexSchema } from '../lib/protocolIndexDb.js'
 import { toBigInt } from '../lib/format.js'
+import { getTreasuryAgentHoldings, getTreasuryAgentLeaderboard } from './treasuryAgent.js'
 
 type Logger = Pick<typeof console, 'info' | 'warn' | 'error'>
 
@@ -1003,6 +1004,116 @@ async function syncLockerStateEvent(client: PoolClient, streamName: string, even
   return { ...result, latestBlock }
 }
 
+async function syncTreasuryAgentLeaderboardSnapshot(client: PoolClient) {
+  const streamName = 'treasury_agent_leaderboard'
+  const lastSyncedBlock = await getLastSyncedBlock(client, streamName)
+  const latestBlock = await withRpcRetries(() => publicClient.getBlockNumber())
+  if (latestBlock <= lastSyncedBlock) {
+    return { streamName, inserted: 0, latestBlock }
+  }
+
+  const payload = await getTreasuryAgentLeaderboard(500)
+
+  await runWriteQuery('delete from protocol_treasury_agent_leaderboard', [])
+
+  await upsertRows(payload.entries, ROW_UPSERT_CONCURRENCY, async (entry) => {
+    await runWriteQuery(
+      `
+        insert into protocol_treasury_agent_leaderboard (
+          user_address, rank, deposited, pending, rewards, snapshot_block, updated_at
+        )
+        values ($1,$2,$3,$4,$5,$6,now())
+        on conflict (user_address) do update
+        set rank = excluded.rank,
+            deposited = excluded.deposited,
+            pending = excluded.pending,
+            rewards = excluded.rewards,
+            snapshot_block = excluded.snapshot_block,
+            updated_at = excluded.updated_at
+      `,
+      [
+        entry.address,
+        entry.rank,
+        entry.depositedFormatted,
+        entry.pendingFormatted,
+        entry.rewardsFormatted,
+        latestBlock.toString(),
+      ]
+    )
+  })
+
+  await updateSyncState(client, streamName, latestBlock)
+  return { streamName, inserted: payload.entries.length, latestBlock }
+}
+
+async function syncTreasuryAgentHoldingsSnapshot(client: PoolClient) {
+  const streamName = 'treasury_agent_holdings'
+  const lastSyncedBlock = await getLastSyncedBlock(client, streamName)
+  const latestBlock = await withRpcRetries(() => publicClient.getBlockNumber())
+  if (latestBlock <= lastSyncedBlock) {
+    return { streamName, inserted: 0, latestBlock }
+  }
+
+  const payload = await getTreasuryAgentHoldings()
+
+  if (payload.walletAddress) {
+    await runWriteQuery(
+      'delete from protocol_treasury_agent_holdings where wallet_address = $1',
+      [payload.walletAddress]
+    )
+  } else {
+    await runWriteQuery('delete from protocol_treasury_agent_holdings', [])
+  }
+
+  await upsertRows(payload.entries, ROW_UPSERT_CONCURRENCY, async (entry) => {
+    await runWriteQuery(
+      `
+        insert into protocol_treasury_agent_holdings (
+          wallet_address, token_key, token_address, symbol, name, balance, balance_formatted,
+          usd_value, usd_value_formatted, allocation, decimals, logo_url, coingecko_url,
+          is_native, snapshot_block, updated_at
+        )
+        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,now())
+        on conflict (wallet_address, token_key) do update
+        set token_address = excluded.token_address,
+            symbol = excluded.symbol,
+            name = excluded.name,
+            balance = excluded.balance,
+            balance_formatted = excluded.balance_formatted,
+            usd_value = excluded.usd_value,
+            usd_value_formatted = excluded.usd_value_formatted,
+            allocation = excluded.allocation,
+            decimals = excluded.decimals,
+            logo_url = excluded.logo_url,
+            coingecko_url = excluded.coingecko_url,
+            is_native = excluded.is_native,
+            snapshot_block = excluded.snapshot_block,
+            updated_at = excluded.updated_at
+      `,
+      [
+        payload.walletAddress,
+        entry.isNative ? 'native' : (entry.address ?? entry.symbol.toLowerCase()),
+        entry.address,
+        entry.symbol,
+        entry.name,
+        entry.balance,
+        entry.balanceFormatted,
+        entry.usdValue,
+        entry.usdValueFormatted,
+        entry.allocation,
+        entry.decimals,
+        entry.logoUrl,
+        entry.coingeckoUrl,
+        entry.isNative,
+        latestBlock.toString(),
+      ]
+    )
+  })
+
+  await updateSyncState(client, streamName, latestBlock)
+  return { streamName, inserted: payload.entries.length, latestBlock }
+}
+
 export async function runProtocolIndexSyncOnce(options?: {
   logger?: Logger
 }) {
@@ -1046,6 +1157,8 @@ export async function runProtocolIndexSyncOnce(options?: {
     await runStream('locker_added', () => syncLockerStateEvent(client, 'locker_added', ADDED_TO_LOCK_EVENT))
     await runStream('locker_extended', () => syncLockerStateEvent(client, 'locker_extended', EXTENDED_LOCK_EVENT))
     await runStream('locker_unlocked', () => syncLockerStateEvent(client, 'locker_unlocked', UNLOCKED_EVENT))
+    await runStream('treasury_agent_leaderboard', () => syncTreasuryAgentLeaderboardSnapshot(client))
+    await runStream('treasury_agent_holdings', () => syncTreasuryAgentHoldingsSnapshot(client))
 
     const latestSyncedBlock = results.reduce((max, result) => (
       result.latestBlock > max ? result.latestBlock : max

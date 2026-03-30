@@ -1,5 +1,5 @@
 import type { AbiEvent, Address, Log } from 'viem'
-import { formatEther, formatUnits, getAddress, isAddress, parseAbi, parseAbiItem } from 'viem'
+import { formatEther, getAddress, isAddress, parseAbi, parseAbiItem } from 'viem'
 import lootAbi from '../abis/Loot.json' with { type: 'json' }
 import gridMiningAbi from '../abis/GridMining.json' with { type: 'json' }
 import treasuryAbi from '../abis/Treasury.json' with { type: 'json' }
@@ -9,6 +9,8 @@ import { CONTRACTS, PROTOCOL_CONSTANTS } from '../config/contracts.js'
 import { env } from '../config/env.js'
 import { publicClient } from '../lib/client.js'
 import { countSelectedBlocks, decodeBlockMask, etherFixed, etherString, relativeTime, safeAddressEq, toBigInt } from '../lib/format.js'
+import { getIndexedTreasuryAgentHoldings, getIndexedTreasuryAgentLeaderboard } from './protocolIndex.js'
+import { getTreasuryAgentHoldings as getLiveTreasuryAgentHoldings, getTreasuryAgentLeaderboard as getLiveTreasuryAgentLeaderboard } from './treasuryAgent.js'
 
 const DEPLOYED_EVENT = parseAbiItem(
   'event Deployed(uint64 indexed roundId, address indexed user, uint256 amountPerBlock, uint256 blockMask, uint256 totalAmount)'
@@ -30,15 +32,6 @@ const STAKE_WITHDRAW_EVENT = parseAbiItem('event Withdrawn(address indexed user,
 const YIELD_DISTRIBUTED_EVENT = parseAbiItem('event YieldDistributed(uint256 amount, uint256 newAccYieldPerShare)')
 const CHECKPOINTED_EVENT = parseAbiItem('event Checkpointed(uint64 indexed roundId, address indexed user, uint256 ethReward, uint256 lootReward)')
 const CLAIMED_LOOT_EVENT = parseAbiItem('event ClaimedLOOT(address indexed user, uint256 minedLoot, uint256 forgedLoot, uint256 fee, uint256 net)')
-const TREASURY_AGENT_DEPOSIT_QUEUED_EVENT = parseAbiItem(
-  'event UserDepositQueued(address indexed caller, address indexed receiver, uint256 assets)'
-)
-const TREASURY_AGENT_LOOT_CLAIMED_EVENT = parseAbiItem('event LootClaimed(address indexed user, uint256 amount)')
-const TREASURY_AGENT_CONFIG_ABI = parseAbi([
-  'function multisig() view returns (address)',
-  'function asset() view returns (address)',
-  'function loot() view returns (address)',
-])
 const LOCK_REWARD_NOTIFIED_EVENT = parseAbiItem(
   'event RewardNotified(uint256 amount, uint256 distributedAmount, uint256 unallocatedAmount, uint256 accRewardPerWeight)'
 )
@@ -62,17 +55,7 @@ const LOCKER_REWARDS_READ_ABI = parseAbi([
   'function totalNotified() view returns (uint256)',
   'function totalClaimed() view returns (uint256)',
 ])
-const TREASURY_AGENT_READ_ABI = parseAbi([
-  'function getUserPosition(address user) view returns (uint256 shares, uint256 pendingDepositAssets, uint256 pendingWithdrawShares, uint256 claimableWithdrawAssets, uint256 claimableLoot, uint256 redeemableAssets)',
-])
-const ERC20_READ_ABI = parseAbi([
-  'function balanceOf(address) view returns (uint256)',
-  'function symbol() view returns (string)',
-  'function name() view returns (string)',
-  'function decimals() view returns (uint8)',
-])
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000' as Address
-const BASE_WETH = '0x4200000000000000000000000000000000000006' as Address
 
 export type DeploymentLog = Log<bigint, number, false, typeof DEPLOYED_EVENT> | Log<bigint, number, false, typeof DEPLOYED_FOR_EVENT>
 type RoundSettledLog = Log<bigint, number, false, typeof ROUND_SETTLED_EVENT>
@@ -111,26 +94,6 @@ type DeploymentSnapshot = {
 type StakeSnapshot = {
   balances: Map<string, bigint>
 }
-type TreasuryAgentUserPosition = readonly [bigint, bigint, bigint, bigint, bigint, bigint]
-type TreasuryAgentConfig = {
-  multisig: Address
-  asset: Address
-  loot: Address
-}
-type TreasuryHoldingEntry = {
-  symbol: string
-  name: string
-  address: Address | null
-  balance: string
-  balanceFormatted: string
-  usdValue: number
-  usdValueFormatted: string
-  allocation: number
-  decimals: number
-  logoUrl: string | null
-  coingeckoUrl: string | null
-  isNative: boolean
-}
 
 const blockTimestampCache = new Map<string, number>()
 const LOG_BLOCK_RANGE = 10_000n
@@ -145,9 +108,6 @@ const RPC_RETRY_ATTEMPTS = 3
 const USER_HISTORY_MAX_LIMIT = 200
 const USER_HISTORY_CONCURRENCY = 8
 const LEADERBOARD_EARNERS_CONCURRENCY = 6
-const COINGECKO_META_TTL_MS = 6 * 60 * 60_000
-const TOKEN_PRICE_TTL_MS = 5 * 60_000
-const MIN_HOLDING_USD = 5
 let scanStartBlockPromise: Promise<bigint> | null = null
 let protocolStatusCache: { value: Promise<{ gameStarted: boolean; currentRoundId: bigint }>; expiresAt: number } | null = null
 let currentRoundCache: CurrentRoundCache | null = null
@@ -155,26 +115,6 @@ const responseCache = new Map<string, { expiresAt: number; value: unknown }>()
 const inflightCache = new Map<string, Promise<unknown>>()
 const historicalLogCache = new Map<string, HistoricalLogCacheEntry>()
 const historicalLogInflight = new Map<string, Promise<unknown[]>>()
-const COINGECKO_FALLBACKS: Record<string, { logoUrl: string; coingeckoUrl: string; name: string; symbol: string }> = {
-  native_eth: {
-    logoUrl: 'https://coin-images.coingecko.com/coins/images/279/small/ethereum.png?1696501628',
-    coingeckoUrl: 'https://www.coingecko.com/en/coins/ethereum',
-    name: 'Ethereum',
-    symbol: 'ETH',
-  },
-  '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913': {
-    logoUrl: 'https://coin-images.coingecko.com/coins/images/6319/small/USDC.png?1769615602',
-    coingeckoUrl: 'https://www.coingecko.com/en/coins/usdc',
-    name: 'USD Coin',
-    symbol: 'USDC',
-  },
-  '0x4200000000000000000000000000000000000006': {
-    logoUrl: 'https://coin-images.coingecko.com/coins/images/39810/small/weth.png?1724139790',
-    coingeckoUrl: 'https://www.coingecko.com/en/coins/l2-standard-bridged-weth-base',
-    name: 'Wrapped Ether',
-    symbol: 'WETH',
-  },
-}
 
 async function withCache<T>(key: string, ttlMs: number, loader: () => Promise<T>): Promise<T> {
   const now = Date.now()
@@ -254,7 +194,6 @@ async function getScanStartBlock() {
     scanStartBlockPromise = Promise.all([
       findContractDeploymentBlock(CONTRACTS.gridMining),
       findContractDeploymentBlock(CONTRACTS.treasury),
-      findContractDeploymentBlock(CONTRACTS.treasuryAgent),
       findContractDeploymentBlock(CONTRACTS.staking),
       findContractDeploymentBlock(CONTRACTS.autoMiner),
       findContractDeploymentBlock(CONTRACTS.lootLocker),
@@ -348,7 +287,7 @@ async function mapWithConcurrency<T, R>(
 
 async function getLogsPaged<TEvent extends AbiEvent | undefined>(
   params: {
-    address?: Address
+    address: Address
     event: TEvent
     args?: Record<string, unknown>
     fromBlock?: bigint
@@ -433,7 +372,7 @@ async function getCachedLogsPaged<TEvent extends AbiEvent | undefined>(
   key: string,
   ttlMs: number,
   params: {
-    address?: Address
+    address: Address
     event: TEvent
     args?: Record<string, unknown>
     fromBlock?: bigint
@@ -530,159 +469,6 @@ function emptyPricePayload() {
     priceUsd: 0,
     payload: formatPricePayload(0, []),
   }
-}
-
-function formatTokenAmount(value: bigint, decimals: number) {
-  return formatUnits(value, decimals)
-}
-
-function formatTokenBalance(value: bigint, decimals: number) {
-  const parsed = Number.parseFloat(formatUnits(value, decimals))
-  const maximumFractionDigits = parsed >= 1_000 ? 2 : parsed >= 1 ? 4 : 6
-
-  return parsed.toLocaleString('en-US', {
-    minimumFractionDigits: 0,
-    maximumFractionDigits,
-  })
-}
-
-function formatUsdValue(value: number) {
-  return value.toLocaleString('en-US', {
-    style: 'currency',
-    currency: 'USD',
-    minimumFractionDigits: value >= 100 ? 0 : 2,
-    maximumFractionDigits: value >= 100 ? 0 : 2,
-  })
-}
-
-async function getTreasuryAgentStartBlock() {
-  return withCache('treasury-agent:start-block', HEAVY_ROUTE_CACHE_TTL_MS, async () => {
-    const deploymentBlock = await findContractDeploymentBlock(CONTRACTS.treasuryAgent)
-    return deploymentBlock > 250n ? deploymentBlock - 250n : 0n
-  })
-}
-
-async function getTreasuryAgentConfig(): Promise<TreasuryAgentConfig> {
-  return withCache('treasury-agent:config', HEAVY_ROUTE_CACHE_TTL_MS, async () => {
-    const [multisig, asset, loot] = await Promise.all([
-      withRpcRetries(() => publicClient.readContract({
-        address: CONTRACTS.treasuryAgent,
-        abi: TREASURY_AGENT_CONFIG_ABI,
-        functionName: 'multisig',
-      }) as Promise<Address>),
-      withRpcRetries(() => publicClient.readContract({
-        address: CONTRACTS.treasuryAgent,
-        abi: TREASURY_AGENT_CONFIG_ABI,
-        functionName: 'asset',
-      }) as Promise<Address>),
-      withRpcRetries(() => publicClient.readContract({
-        address: CONTRACTS.treasuryAgent,
-        abi: TREASURY_AGENT_CONFIG_ABI,
-        functionName: 'loot',
-      }) as Promise<Address>),
-    ])
-
-    return { multisig, asset, loot }
-  })
-}
-
-async function getCoinGeckoTokenMeta(address: Address | null, native = false) {
-  const normalizedAddress = address?.toLowerCase()
-  const cacheKey = native ? 'coingecko:v2:token:native' : `coingecko:v2:token:${normalizedAddress ?? 'unknown'}`
-  const fallbackMeta = native
-    ? COINGECKO_FALLBACKS.native_eth
-    : (normalizedAddress ? COINGECKO_FALLBACKS[normalizedAddress] : undefined)
-
-  return withCache(cacheKey, COINGECKO_META_TTL_MS, async () => {
-    const endpoint = native
-      ? 'https://api.coingecko.com/api/v3/coins/ethereum?localization=false&tickers=false&market_data=false&community_data=false&developer_data=false&sparkline=false'
-      : `https://api.coingecko.com/api/v3/coins/base/contract/${normalizedAddress}`
-
-    try {
-      const response = await fetch(endpoint, { cache: 'no-store' })
-      if (!response.ok) {
-        return {
-          logoUrl: fallbackMeta?.logoUrl ?? null,
-          coingeckoUrl: fallbackMeta?.coingeckoUrl ?? null,
-          name: fallbackMeta?.name ?? null,
-          symbol: fallbackMeta?.symbol ?? null,
-          priceUsd: null,
-        }
-      }
-
-      const data = await response.json() as {
-        id?: string
-        web_slug?: string
-        name?: string
-        symbol?: string
-        image?: { small?: string | null; thumb?: string | null }
-        market_data?: { current_price?: { usd?: number | null } }
-      }
-
-      return {
-        logoUrl: data.image?.small ?? data.image?.thumb ?? fallbackMeta?.logoUrl ?? null,
-        coingeckoUrl: data.web_slug
-          ? `https://www.coingecko.com/en/coins/${data.web_slug}`
-          : data.id
-            ? `https://www.coingecko.com/en/coins/${data.id}`
-            : fallbackMeta?.coingeckoUrl ?? null,
-        name: data.name ?? fallbackMeta?.name ?? null,
-        symbol: data.symbol ? data.symbol.toUpperCase() : fallbackMeta?.symbol ?? null,
-        priceUsd: typeof data.market_data?.current_price?.usd === 'number' ? data.market_data.current_price.usd : null,
-      }
-    } catch {
-      return {
-        logoUrl: fallbackMeta?.logoUrl ?? null,
-        coingeckoUrl: fallbackMeta?.coingeckoUrl ?? null,
-        name: fallbackMeta?.name ?? null,
-        symbol: fallbackMeta?.symbol ?? null,
-        priceUsd: null,
-      }
-    }
-  })
-}
-
-async function getTokenPriceUsd(address: Address | null, native = false) {
-  const resolvedAddress = native ? BASE_WETH : address
-  if (!resolvedAddress) {
-    return 0
-  }
-
-  const cacheKey = `dexscreener:v1:price:${resolvedAddress.toLowerCase()}`
-
-  return withCache(cacheKey, TOKEN_PRICE_TTL_MS, async () => {
-    try {
-      const response = await fetch(`https://api.dexscreener.com/token-pairs/v1/base/${resolvedAddress.toLowerCase()}`, {
-        cache: 'no-store',
-      })
-
-      if (!response.ok) {
-        return resolvedAddress.toLowerCase() === '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913' ? 1 : 0
-      }
-
-      const pairs = await response.json() as Array<{
-        priceUsd?: string
-        liquidity?: { usd?: number }
-        baseToken?: { address?: string | null }
-        quoteToken?: { address?: string | null }
-      }>
-      if (!Array.isArray(pairs) || pairs.length === 0) {
-        return resolvedAddress.toLowerCase() === '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913' ? 1 : 0
-      }
-
-      const tokenAddress = resolvedAddress.toLowerCase()
-      const candidatePairs = pairs.filter((pair) => pair.baseToken?.address?.toLowerCase() === tokenAddress)
-      const bestPair = [...(candidatePairs.length > 0 ? candidatePairs : pairs)]
-        .sort((a, b) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0))[0]
-      const parsedPrice = Number.parseFloat(bestPair?.priceUsd ?? '0')
-
-      return Number.isFinite(parsedPrice) && parsedPrice > 0
-        ? parsedPrice
-        : (resolvedAddress.toLowerCase() === '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913' ? 1 : 0)
-    } catch {
-      return resolvedAddress.toLowerCase() === '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913' ? 1 : 0
-    }
-  })
 }
 
 function formatPricePayload(priceUsd: number, pairs: Array<{ priceUsd?: string; priceNative?: string; volume?: { h24?: number }; liquidity?: { usd?: number }; priceChange?: { h24?: number }; fdv?: number }>) {
@@ -2126,15 +1912,7 @@ export async function getUserHistory(address: Address, limit = 100, roundIdFilte
 
 export async function getLockStats() {
   return withCache('lock-stats', HEAVY_ROUTE_CACHE_TTL_MS, async () => {
-    const [
-      totalLockedResult,
-      totalWeightResult,
-      totalNotifiedResult,
-      totalClaimedResult,
-      snapshotResult,
-      priceResult,
-      rewardLogsResult,
-    ] = await Promise.allSettled([
+    const [totalLockedResult, totalWeightResult, totalNotifiedResult, totalClaimedResult, snapshotResult] = await Promise.allSettled([
       withRpcRetries(() => publicClient.readContract({
         address: CONTRACTS.lootLocker,
         abi: LOOT_LOCKER_READ_ABI,
@@ -2156,8 +1934,6 @@ export async function getLockStats() {
         functionName: 'totalClaimed',
       }) as Promise<bigint>),
       getLockerSnapshot(),
-      getLootPrice(),
-      getLockRewardNotifiedLogs(),
     ])
 
     const totalLocked = totalLockedResult.status === 'fulfilled' ? totalLockedResult.value : 0n
@@ -2167,26 +1943,8 @@ export async function getLockStats() {
     const snapshot = snapshotResult.status === 'fulfilled'
       ? snapshotResult.value
       : { userLocked: new Map<string, bigint>(), userWeight: new Map<string, bigint>() }
-    const price = priceResult.status === 'fulfilled' ? priceResult.value : emptyPricePayload()
-    const rewardLogs = rewardLogsResult.status === 'fulfilled' ? rewardLogsResult.value : []
 
     const lockers = [...snapshot.userLocked.entries()].filter(([, locked]) => locked > 0n).length
-    const lootPriceNative = Number(price.payload.loot.priceNative ?? '0')
-    const lockAprWindowMs = STAKING_APR_WINDOW_DAYS * 24 * 60 * 60 * 1000
-    const now = Date.now()
-
-    let distributedInWindow = 0n
-    for (const log of rewardLogs) {
-      const ts = await getBlockTimestampMs(getLogBlockNumber(log))
-      if (ts >= now - lockAprWindowMs) {
-        distributedInWindow += toBigInt(log.args.distributedAmount)
-      }
-    }
-
-    const totalLockedEth = Number(formatEther(totalLocked)) * lootPriceNative
-    const apr = totalLockedEth > 0
-      ? (Number(formatEther(distributedInWindow)) * (365 / STAKING_APR_WINDOW_DAYS) / totalLockedEth) * 100
-      : 0
 
     return {
       protocolLocked: totalLocked.toString(),
@@ -2198,7 +1956,6 @@ export async function getLockStats() {
       totalClaimed: totalClaimed.toString(),
       totalClaimedFormatted: etherString(totalClaimed),
       lockers,
-      apr: apr.toFixed(2),
     }
   })
 }
@@ -2371,253 +2128,23 @@ export async function getLeaderboardEarners(limit = 12) {
 
 export async function getLeaderboardTreasury(limit = 12) {
   return withCache(`leaderboard-treasury:${limit}`, HEAVY_ROUTE_CACHE_TTL_MS, async () => {
-    const [queuedDeposits, claimedRewards] = await Promise.all([
-      getCachedLogsPaged('treasury-agent:user-deposit-queued', HEAVY_ROUTE_CACHE_TTL_MS, {
-        address: CONTRACTS.treasuryAgent,
-        event: TREASURY_AGENT_DEPOSIT_QUEUED_EVENT,
-      }),
-      getCachedLogsPaged('treasury-agent:loot-claimed', HEAVY_ROUTE_CACHE_TTL_MS, {
-        address: CONTRACTS.treasuryAgent,
-        event: TREASURY_AGENT_LOOT_CLAIMED_EVENT,
-      }),
-    ])
-
-    const claimedLootByUser = new Map<string, bigint>()
-    for (const log of claimedRewards) {
-      const user = normalizeAddress(log.args.user)
-      const amount = toBigInt(log.args.amount ?? 0n)
-      claimedLootByUser.set(user, (claimedLootByUser.get(user) ?? 0n) + amount)
+    const indexed = await getIndexedTreasuryAgentLeaderboard(limit)
+    if (indexed) {
+      return indexed
     }
 
-    const users = Array.from(new Set(
-      queuedDeposits.map((log) => normalizeAddress(log.args.receiver))
-    ))
-
-    if (users.length === 0) {
-      return { entries: [] }
-    }
-
-    const positions = await mapWithConcurrency(users, 6, async (address) => {
-      const result = await withRpcRetries(() => publicClient.readContract({
-        address: CONTRACTS.treasuryAgent,
-        abi: TREASURY_AGENT_READ_ABI,
-        functionName: 'getUserPosition',
-        args: [address],
-      }) as Promise<TreasuryAgentUserPosition>)
-
-      return { address, result }
-    })
-
-    const entries = positions
-      .map(({ address, result }) => {
-        const pendingDepositAssets = result[1]
-        const claimableLoot = result[4]
-        const redeemableAssets = result[5]
-
-        const depositedAssets = redeemableAssets
-        const totalRewards = (claimedLootByUser.get(address) ?? 0n) + claimableLoot
-
-        if (depositedAssets <= 0n && pendingDepositAssets <= 0n && totalRewards <= 0n) {
-          return null
-        }
-
-        return {
-          address,
-          deposited: depositedAssets.toString(),
-          depositedFormatted: formatUnits(depositedAssets, 6),
-          pending: pendingDepositAssets.toString(),
-          pendingFormatted: formatUnits(pendingDepositAssets, 6),
-          rewards: totalRewards.toString(),
-          rewardsFormatted: formatEther(totalRewards),
-        }
-      })
-      .filter((entry): entry is {
-        address: Address
-        deposited: string
-        depositedFormatted: string
-        pending: string
-        pendingFormatted: string
-        rewards: string
-        rewardsFormatted: string
-      } => Boolean(entry))
-      .sort((a, b) => {
-        const depositedDiff = BigInt(b.deposited) - BigInt(a.deposited)
-        if (depositedDiff !== 0n) return depositedDiff > 0n ? 1 : -1
-        const pendingDiff = BigInt(b.pending) - BigInt(a.pending)
-        if (pendingDiff !== 0n) return pendingDiff > 0n ? 1 : -1
-        const rewardsDiff = BigInt(b.rewards) - BigInt(a.rewards)
-        if (rewardsDiff !== 0n) return rewardsDiff > 0n ? 1 : -1
-        return 0
-      })
-      .slice(0, limit)
-      .map((entry, index) => ({
-        rank: index + 1,
-        ...entry,
-      }))
-
-    return { entries }
+    return getLiveTreasuryAgentLeaderboard(limit)
   })
 }
 
 export async function getTreasuryHoldings() {
   return withCache('treasury-holdings', HEAVY_ROUTE_CACHE_TTL_MS, async () => {
-    const config = await getTreasuryAgentConfig()
-    const startBlock = await getTreasuryAgentStartBlock()
-
-    const [nativeBalance, incomingLogs, outgoingLogs] = await Promise.all([
-      withRpcRetries(() => publicClient.getBalance({ address: config.multisig })),
-      getCachedLogsPaged('treasury-agent:wallet-transfers-in', HEAVY_ROUTE_CACHE_TTL_MS, {
-        event: TRANSFER_EVENT,
-        args: { to: config.multisig },
-        fromBlock: startBlock,
-      }),
-      getCachedLogsPaged('treasury-agent:wallet-transfers-out', HEAVY_ROUTE_CACHE_TTL_MS, {
-        event: TRANSFER_EVENT,
-        args: { from: config.multisig },
-        fromBlock: startBlock,
-      }),
-    ])
-
-    const candidateAddresses = new Set<Address>([
-      config.asset,
-      config.loot,
-      BASE_WETH,
-    ])
-
-    for (const log of incomingLogs) {
-      candidateAddresses.add(normalizeAddress(log.address))
+    const indexed = await getIndexedTreasuryAgentHoldings()
+    if (indexed) {
+      return indexed
     }
 
-    for (const log of outgoingLogs) {
-      candidateAddresses.add(normalizeAddress(log.address))
-    }
-
-    const tokens = (await mapWithConcurrency([...candidateAddresses], 6, async (address) => {
-      try {
-        const [balance, symbol, name, decimals] = await Promise.all([
-          withRpcRetries(() => publicClient.readContract({
-            address,
-            abi: ERC20_READ_ABI,
-            functionName: 'balanceOf',
-            args: [config.multisig],
-          }) as Promise<bigint>),
-          withRpcRetries(() => publicClient.readContract({
-            address,
-            abi: ERC20_READ_ABI,
-            functionName: 'symbol',
-          }) as Promise<string>),
-          withRpcRetries(() => publicClient.readContract({
-            address,
-            abi: ERC20_READ_ABI,
-            functionName: 'name',
-          }) as Promise<string>),
-          withRpcRetries(() => publicClient.readContract({
-            address,
-            abi: ERC20_READ_ABI,
-            functionName: 'decimals',
-          }) as Promise<number>),
-        ])
-
-        if (balance <= 0n) {
-          return null
-        }
-
-        return {
-          address,
-          balance,
-          symbol,
-          name,
-          decimals: Number(decimals),
-        }
-      } catch {
-        return null
-      }
-    })).filter((entry): entry is {
-      address: Address
-      balance: bigint
-      symbol: string
-      name: string
-      decimals: number
-    } => Boolean(entry))
-
-    const priorityAddresses = new Set([
-      config.asset.toLowerCase(),
-      config.loot.toLowerCase(),
-      BASE_WETH.toLowerCase(),
-    ])
-
-    const tokenEntries = await Promise.all(tokens.map(async (token) => {
-      const meta = await getCoinGeckoTokenMeta(token.address)
-      const priceUsd = await getTokenPriceUsd(token.address)
-
-      if (!meta.logoUrl && !priorityAddresses.has(token.address.toLowerCase())) {
-        return null
-      }
-
-      const balanceFormattedRaw = formatTokenAmount(token.balance, token.decimals)
-      const balanceValue = Number.parseFloat(balanceFormattedRaw)
-      const usdValue = balanceValue * priceUsd
-
-      if (usdValue < MIN_HOLDING_USD) {
-        return null
-      }
-
-      return {
-        symbol: meta.symbol ?? token.symbol,
-        name: meta.name ?? token.name,
-        address: token.address,
-        balance: balanceFormattedRaw,
-        balanceFormatted: formatTokenBalance(token.balance, token.decimals),
-        usdValue,
-        usdValueFormatted: formatUsdValue(usdValue),
-        allocation: usdValue,
-        decimals: token.decimals,
-        logoUrl: meta.logoUrl,
-        coingeckoUrl: meta.coingeckoUrl,
-        isNative: false,
-      } satisfies TreasuryHoldingEntry
-    }))
-
-    const entries: TreasuryHoldingEntry[] = tokenEntries.filter(Boolean) as TreasuryHoldingEntry[]
-
-    if (nativeBalance > 0n) {
-      const nativeMeta = await getCoinGeckoTokenMeta(null, true)
-      const nativePriceUsd = await getTokenPriceUsd(null, true)
-      const balanceFormattedRaw = formatTokenAmount(nativeBalance, 18)
-      const balanceValue = Number.parseFloat(balanceFormattedRaw)
-      const usdValue = nativePriceUsd * balanceValue
-      if (usdValue >= MIN_HOLDING_USD) {
-        entries.push({
-          symbol: nativeMeta.symbol ?? 'ETH',
-          name: nativeMeta.name ?? 'Ethereum',
-        address: null,
-        balance: balanceFormattedRaw,
-        balanceFormatted: formatTokenBalance(nativeBalance, 18),
-        usdValue,
-        usdValueFormatted: formatUsdValue(usdValue),
-        allocation: usdValue,
-        decimals: 18,
-        logoUrl: nativeMeta.logoUrl,
-          coingeckoUrl: nativeMeta.coingeckoUrl,
-          isNative: true,
-        })
-      }
-    }
-    const totalUsdValue = entries.reduce((sum, entry) => sum + entry.allocation, 0)
-    const normalizedEntries = entries
-      .map((entry) => ({
-        ...entry,
-        allocation: totalUsdValue > 0 ? (entry.allocation / totalUsdValue) * 100 : 0,
-      }))
-      .sort((a, b) => {
-        if (b.allocation !== a.allocation) return b.allocation - a.allocation
-        return a.symbol.localeCompare(b.symbol)
-      })
-
-    return {
-      walletAddress: config.multisig,
-      entries: normalizedEntries,
-    }
+    return getLiveTreasuryAgentHoldings()
   })
 }
 
@@ -2643,6 +2170,7 @@ export async function warmProtocolCaches() {
     getLeaderboardLockers(12),
     getLeaderboardEarners(12),
     getLeaderboardTreasury(12),
+    getTreasuryHoldings(),
     getLockDistributions(1, 12),
     getLockStats(),
   ])

@@ -1,5 +1,5 @@
 import type { PoolClient } from 'pg'
-import { getAddress, type Address } from 'viem'
+import { formatEther, formatUnits, getAddress, type Address } from 'viem'
 import gridMiningAbi from '../abis/GridMining.json' with { type: 'json' }
 import { CONTRACTS, PROTOCOL_CONSTANTS } from '../config/contracts.js'
 import { hasProtocolIndexDatabase, getProtocolIndexPool } from '../lib/protocolIndexDb.js'
@@ -11,6 +11,7 @@ const ONE_ADDRESS = '0x0000000000000000000000000000000000000001'
 const STAKING_APR_WINDOW_DAYS = 7
 const INDEX_ROUNDS_MAX_LAG_BLOCKS = 900n
 const INDEX_TREASURY_MAX_LAG_BLOCKS = 1200n
+const INDEX_TREASURY_AGENT_MAX_LAG_BLOCKS = 1200n
 const INDEX_UNFORGED_MAX_LAG_BLOCKS = 1200n
 const INDEX_HEAD_CACHE_TTL_MS = 5000
 let latestHeadCache: { expiresAt: number; value: bigint } | null = null
@@ -72,6 +73,30 @@ type CheckpointAggRow = {
 type SyncStateRow = {
   stream_name: string
   last_synced_block: string
+}
+
+type TreasuryAgentLeaderboardRow = {
+  user_address: string
+  rank: number
+  deposited: string
+  pending: string
+  rewards: string
+}
+
+type TreasuryAgentHoldingRow = {
+  wallet_address: string
+  token_address: string | null
+  symbol: string
+  name: string
+  balance: string
+  balance_formatted: string
+  usd_value: number
+  usd_value_formatted: string
+  allocation: number
+  decimals: number
+  logo_url: string | null
+  coingecko_url: string | null
+  is_native: boolean
 }
 
 function toBigInt(value: string | number | bigint | null | undefined) {
@@ -589,6 +614,81 @@ export async function getIndexedBuybacks(page = 1, limit = 12) {
   })
 }
 
+export async function getIndexedTreasuryAgentLeaderboard(limit = 12) {
+  return withProtocolIndex(['treasury_agent_leaderboard'], async (client) => {
+    const safeLimit = Number.isFinite(limit) ? Math.max(1, Math.min(Math.floor(limit), 500)) : 12
+    const result = await client.query<TreasuryAgentLeaderboardRow>(
+      `
+        select user_address, rank, deposited::text, pending::text, rewards::text
+        from protocol_treasury_agent_leaderboard
+        order by rank asc, deposited::numeric desc, pending::numeric desc, rewards::numeric desc
+        limit $1
+      `,
+      [safeLimit]
+    )
+
+    return {
+      entries: result.rows.map((row) => ({
+        rank: row.rank,
+        address: getAddress(row.user_address),
+        deposited: row.deposited,
+        depositedFormatted: formatUnits(toBigInt(row.deposited), 6),
+        pending: row.pending,
+        pendingFormatted: formatUnits(toBigInt(row.pending), 6),
+        rewards: row.rewards,
+        rewardsFormatted: formatEther(toBigInt(row.rewards)),
+      })),
+    }
+  }, {
+    maxLagBlocks: INDEX_TREASURY_AGENT_MAX_LAG_BLOCKS,
+  })
+}
+
+export async function getIndexedTreasuryAgentHoldings() {
+  return withProtocolIndex(['treasury_agent_holdings'], async (client) => {
+    const result = await client.query<TreasuryAgentHoldingRow>(
+      `
+        select
+          wallet_address,
+          token_address,
+          symbol,
+          name,
+          balance::text,
+          balance_formatted,
+          usd_value,
+          usd_value_formatted,
+          allocation,
+          decimals,
+          logo_url,
+          coingecko_url,
+          is_native
+        from protocol_treasury_agent_holdings
+        order by allocation desc, symbol asc
+      `
+    )
+
+    return {
+      walletAddress: result.rows[0]?.wallet_address ?? null,
+      entries: result.rows.map((row) => ({
+        symbol: row.symbol,
+        name: row.name,
+        address: row.token_address ? getAddress(row.token_address) : null,
+        balance: row.balance,
+        balanceFormatted: row.balance_formatted,
+        usdValue: Number(row.usd_value),
+        usdValueFormatted: row.usd_value_formatted,
+        allocation: Number(row.allocation),
+        decimals: Number(row.decimals),
+        logoUrl: row.logo_url,
+        coingeckoUrl: row.coingecko_url,
+        isNative: row.is_native,
+      })),
+    }
+  }, {
+    maxLagBlocks: INDEX_TREASURY_AGENT_MAX_LAG_BLOCKS,
+  })
+}
+
 export async function getIndexedStakingSnapshot() {
   return withProtocolIndex(['staking_deposits', 'staking_withdrawals', 'staking_compounds', 'staking_yield_distributions'], async (client) => {
     const result = await client.query<{
@@ -646,7 +746,6 @@ export async function getIndexedLockSnapshot() {
       lockers: string
       total_notified: string
       protocol_weight: string
-      distributed_in_window: string
     }>(`
       with locked as (
         select user_address, coalesce(sum(amount_delta), 0) as locked_amount
@@ -661,24 +760,16 @@ export async function getIndexedLockSnapshot() {
         limit 1
       ),
       rewards as (
-        select
-          coalesce(sum(amount), 0)::text as total_notified,
-          coalesce(
-            sum(distributed_amount) filter (
-              where block_timestamp >= now() - make_interval(days => $1::int)
-            ),
-            0
-          )::text as distributed_in_window
+        select coalesce(sum(amount), 0)::text as total_notified
         from protocol_lock_reward_notified
       )
       select
         coalesce(sum(case when locked_amount > 0 then locked_amount else 0 end), 0)::text as protocol_locked,
         (count(*) filter (where locked_amount > 0))::text as lockers,
         (select total_notified from rewards),
-        coalesce((select protocol_weight from latest_weight), '0') as protocol_weight,
-        (select distributed_in_window from rewards)
+        coalesce((select protocol_weight from latest_weight), '0') as protocol_weight
       from locked
-    `, [String(STAKING_APR_WINDOW_DAYS)])
+    `)
 
     const row = result.rows[0]
     return {
@@ -689,8 +780,6 @@ export async function getIndexedLockSnapshot() {
       totalNotifiedFormatted: etherString(toBigInt(row.total_notified)),
       protocolWeight: row.protocol_weight,
       protocolWeightFormatted: etherString(toBigInt(row.protocol_weight)),
-      distributedInWindow: row.distributed_in_window,
-      distributedInWindowFormatted: etherString(toBigInt(row.distributed_in_window)),
     }
   })
 }

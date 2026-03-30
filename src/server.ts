@@ -19,14 +19,15 @@ import {
   getLeaderboardMiners,
   getLeaderboardStakers,
   getLeaderboardTreasury,
+  getLootPriceCached,
   getLockStats,
   getRound,
   getRoundMiners,
   getRounds,
   getStakingStats,
   getStats,
-  getTreasuryHoldings,
   getTreasuryStats,
+  getTreasuryHoldings,
   getUserHistory,
   getUserRewards,
   getUserStake,
@@ -42,6 +43,8 @@ const app = Fastify({ logger: true })
 let lootpotWorkerStopping = false
 let lootpotWorkerTimer: NodeJS.Timeout | null = null
 let cacheWarmTimer: NodeJS.Timeout | null = null
+let cacheWarmerStopping = false
+let cacheWarmerRunning = false
 let agentStatsWorkerStopping = false
 let agentStatsWorkerTimer: NodeJS.Timeout | null = null
 const discordPriceWorker = createDiscordPriceWorker({ logger: console })
@@ -55,10 +58,9 @@ await app.register(cors, {
 app.get('/health', async () => ({ ok: true }))
 
 app.get('/api/price', async () => {
-  const stats = await getStats()
+  const price = await getLootPriceCached()
   return {
-    loot: stats.loot,
-    fetchedAt: stats.fetchedAt,
+    ...price.payload,
   }
 })
 
@@ -257,8 +259,9 @@ function stopLootpotWorker() {
 }
 
 function stopCacheWarmer() {
+  cacheWarmerStopping = true
   if (cacheWarmTimer) {
-    clearInterval(cacheWarmTimer)
+    clearTimeout(cacheWarmTimer)
     cacheWarmTimer = null
   }
 }
@@ -272,19 +275,35 @@ function stopAgentStatsWorker() {
 }
 
 function startCacheWarmer() {
+  cacheWarmerStopping = false
+  const schedule = (delayMs: number) => {
+    if (cacheWarmerStopping) return
+    cacheWarmTimer = setTimeout(() => {
+      void run()
+    }, delayMs)
+  }
+
   const run = async () => {
+    if (cacheWarmerStopping) return
+    if (cacheWarmerRunning) {
+      app.log.warn('[cache-warmer] previous cycle still running, skipping overlap')
+      schedule(env.cacheWarmIntervalMs)
+      return
+    }
+
+    cacheWarmerRunning = true
     try {
       await warmProtocolCaches()
       app.log.info('[cache-warmer] cycle complete')
     } catch (error) {
       app.log.error(error, '[cache-warmer] cycle failed')
+    } finally {
+      cacheWarmerRunning = false
+      schedule(env.cacheWarmIntervalMs)
     }
   }
 
-  void run()
-  cacheWarmTimer = setInterval(() => {
-    void run()
-  }, 45_000)
+  schedule(env.cacheWarmIntervalMs)
 }
 
 function startLootpotWorker() {

@@ -55,7 +55,6 @@ export const env = {
   lootpotLookbackBlocks: toBigInt(process.env.LOOTPOT_LOOKBACK_BLOCKS, 21600n),
   lootpotPollIntervalMs: toNumber(process.env.LOOTPOT_POLL_INTERVAL_MS, 120000),
   lootpotWorkerTest: process.env.LOOTPOT_WORKER_TEST === 'true',
-  enableCacheWarmer: process.env.ENABLE_CACHE_WARMER === 'true',
   cacheWarmIntervalMs: toNumber(process.env.CACHE_WARM_INTERVAL_MS, 120000),
   rpcPrimary: process.env.RPC_URL_PRIMARY || 'https://palpable-warmhearted-market.base-mainnet.quiknode.pro/7408c8d889727444f216cab5674cb5954a51b8b6/',
   rpcFallback1: process.env.RPC_URL_FALLBACK_1 || 'https://lb.drpc.live/base/ApemCwwcnEdhvRuDv6G7yCkC4TLyIlcR8aX6dg7bSgwO',
