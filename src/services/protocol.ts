@@ -2126,7 +2126,15 @@ export async function getUserHistory(address: Address, limit = 100, roundIdFilte
 
 export async function getLockStats() {
   return withCache('lock-stats', HEAVY_ROUTE_CACHE_TTL_MS, async () => {
-    const [totalLockedResult, totalWeightResult, totalNotifiedResult, totalClaimedResult, snapshotResult] = await Promise.allSettled([
+    const [
+      totalLockedResult,
+      totalWeightResult,
+      totalNotifiedResult,
+      totalClaimedResult,
+      snapshotResult,
+      priceResult,
+      rewardLogsResult,
+    ] = await Promise.allSettled([
       withRpcRetries(() => publicClient.readContract({
         address: CONTRACTS.lootLocker,
         abi: LOOT_LOCKER_READ_ABI,
@@ -2148,6 +2156,8 @@ export async function getLockStats() {
         functionName: 'totalClaimed',
       }) as Promise<bigint>),
       getLockerSnapshot(),
+      getLootPrice(),
+      getLockRewardNotifiedLogs(),
     ])
 
     const totalLocked = totalLockedResult.status === 'fulfilled' ? totalLockedResult.value : 0n
@@ -2157,8 +2167,26 @@ export async function getLockStats() {
     const snapshot = snapshotResult.status === 'fulfilled'
       ? snapshotResult.value
       : { userLocked: new Map<string, bigint>(), userWeight: new Map<string, bigint>() }
+    const price = priceResult.status === 'fulfilled' ? priceResult.value : emptyPricePayload()
+    const rewardLogs = rewardLogsResult.status === 'fulfilled' ? rewardLogsResult.value : []
 
     const lockers = [...snapshot.userLocked.entries()].filter(([, locked]) => locked > 0n).length
+    const lootPriceNative = Number(price.payload.loot.priceNative ?? '0')
+    const lockAprWindowMs = STAKING_APR_WINDOW_DAYS * 24 * 60 * 60 * 1000
+    const now = Date.now()
+
+    let distributedInWindow = 0n
+    for (const log of rewardLogs) {
+      const ts = await getBlockTimestampMs(getLogBlockNumber(log))
+      if (ts >= now - lockAprWindowMs) {
+        distributedInWindow += toBigInt(log.args.distributedAmount)
+      }
+    }
+
+    const totalLockedEth = Number(formatEther(totalLocked)) * lootPriceNative
+    const apr = totalLockedEth > 0
+      ? (Number(formatEther(distributedInWindow)) * (365 / STAKING_APR_WINDOW_DAYS) / totalLockedEth) * 100
+      : 0
 
     return {
       protocolLocked: totalLocked.toString(),
@@ -2170,6 +2198,7 @@ export async function getLockStats() {
       totalClaimed: totalClaimed.toString(),
       totalClaimedFormatted: etherString(totalClaimed),
       lockers,
+      apr: apr.toFixed(2),
     }
   })
 }
