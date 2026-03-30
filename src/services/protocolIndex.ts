@@ -99,6 +99,15 @@ type TreasuryAgentHoldingRow = {
   is_native: boolean
 }
 
+function formatIndexedDecimal(value: string, digits = 4) {
+  const parsed = Number.parseFloat(value)
+  if (!Number.isFinite(parsed)) {
+    return (0).toFixed(digits)
+  }
+
+  return parsed.toFixed(digits)
+}
+
 function toBigInt(value: string | number | bigint | null | undefined) {
   if (value == null) return 0n
   if (typeof value === 'bigint') return value
@@ -632,11 +641,11 @@ export async function getIndexedTreasuryAgentLeaderboard(limit = 12) {
         rank: row.rank,
         address: getAddress(row.user_address),
         deposited: row.deposited,
-        depositedFormatted: formatUnits(toBigInt(row.deposited), 6),
+        depositedFormatted: formatIndexedDecimal(row.deposited),
         pending: row.pending,
-        pendingFormatted: formatUnits(toBigInt(row.pending), 6),
+        pendingFormatted: formatIndexedDecimal(row.pending),
         rewards: row.rewards,
-        rewardsFormatted: formatEther(toBigInt(row.rewards)),
+        rewardsFormatted: formatIndexedDecimal(row.rewards),
       })),
     }
   }, {
