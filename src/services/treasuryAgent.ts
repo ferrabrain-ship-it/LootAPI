@@ -267,7 +267,8 @@ async function getLogsPaged<TEvent extends AbiEvent | undefined>(params: {
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
-      if (!isRangeLimitError(message) || blockRange <= MIN_LOG_BLOCK_RANGE) {
+      const shouldShrinkRange = isRangeLimitError(message) || isRetryableRpcError(message)
+      if (!shouldShrinkRange || blockRange <= MIN_LOG_BLOCK_RANGE) {
         throw error
       }
 
