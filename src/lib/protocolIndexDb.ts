@@ -191,6 +191,8 @@ create table if not exists protocol_treasury_agent_holdings (
   token_address text,
   symbol text not null,
   name text not null,
+  protocol text,
+  location_label text,
   balance numeric(78,18) not null,
   balance_formatted text not null,
   usd_value double precision not null default 0,
@@ -204,6 +206,12 @@ create table if not exists protocol_treasury_agent_holdings (
   updated_at timestamptz not null default now(),
   primary key (wallet_address, token_key)
 );
+
+alter table protocol_treasury_agent_holdings
+  add column if not exists protocol text;
+
+alter table protocol_treasury_agent_holdings
+  add column if not exists location_label text;
 
 create index if not exists idx_protocol_rounds_settled_block
   on protocol_rounds (settled_block_number desc);

@@ -1069,15 +1069,17 @@ async function syncTreasuryAgentHoldingsSnapshot(client: PoolClient) {
     await runWriteQuery(
       `
         insert into protocol_treasury_agent_holdings (
-          wallet_address, token_key, token_address, symbol, name, balance, balance_formatted,
-          usd_value, usd_value_formatted, allocation, decimals, logo_url, coingecko_url,
+          wallet_address, token_key, token_address, symbol, name, protocol, location_label,
+          balance, balance_formatted, usd_value, usd_value_formatted, allocation, decimals, logo_url, coingecko_url,
           is_native, snapshot_block, updated_at
         )
-        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,now())
+        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,now())
         on conflict (wallet_address, token_key) do update
         set token_address = excluded.token_address,
             symbol = excluded.symbol,
             name = excluded.name,
+            protocol = excluded.protocol,
+            location_label = excluded.location_label,
             balance = excluded.balance,
             balance_formatted = excluded.balance_formatted,
             usd_value = excluded.usd_value,
@@ -1092,10 +1094,12 @@ async function syncTreasuryAgentHoldingsSnapshot(client: PoolClient) {
       `,
       [
         payload.walletAddress,
-        entry.isNative ? 'native' : (entry.address ?? entry.symbol.toLowerCase()),
+        entry.tokenKey,
         entry.address,
         entry.symbol,
         entry.name,
+        entry.protocol,
+        entry.locationLabel,
         entry.balance,
         entry.balanceFormatted,
         entry.usdValue,

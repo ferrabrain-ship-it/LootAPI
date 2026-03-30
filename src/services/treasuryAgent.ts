@@ -13,6 +13,7 @@ export type TreasuryLeaderboardEntry = {
 }
 
 export type TreasuryHoldingEntry = {
+  tokenKey: string
   symbol: string
   name: string
   address: string | null
@@ -25,6 +26,8 @@ export type TreasuryHoldingEntry = {
   logoUrl: string | null
   coingeckoUrl: string | null
   isNative: boolean
+  protocol: string | null
+  locationLabel: string | null
 }
 
 const ZERO = 0n
@@ -52,6 +55,16 @@ const erc20ReadAbi = parseAbi([
   'function symbol() view returns (string)',
   'function name() view returns (string)',
   'function decimals() view returns (uint8)',
+])
+
+const aavePositionAbi = parseAbi([
+  'function UNDERLYING_ASSET_ADDRESS() view returns (address)',
+])
+
+const morphoVaultAbi = parseAbi([
+  'function MORPHO() view returns (address)',
+  'function asset() view returns (address)',
+  'function convertToAssets(uint256 shares) view returns (uint256)',
 ])
 
 const depositQueuedEvent = parseAbiItem(
@@ -141,6 +154,134 @@ function formatUsdValue(value: number) {
     minimumFractionDigits: value >= 100 ? 0 : 2,
     maximumFractionDigits: value >= 100 ? 0 : 2,
   })
+}
+
+async function readTokenDescriptor(address: Address) {
+  const [symbol, name, decimals] = await Promise.all([
+    withRpcRetries(() => publicClient.readContract({
+      address,
+      abi: erc20ReadAbi,
+      functionName: 'symbol',
+    }) as Promise<string>),
+    withRpcRetries(() => publicClient.readContract({
+      address,
+      abi: erc20ReadAbi,
+      functionName: 'name',
+    }) as Promise<string>),
+    withRpcRetries(() => publicClient.readContract({
+      address,
+      abi: erc20ReadAbi,
+      functionName: 'decimals',
+    }) as Promise<number>),
+  ])
+
+  return {
+    symbol,
+    name,
+    decimals: Number(decimals),
+  }
+}
+
+async function buildProtocolHoldingEntry(params: {
+  tokenAddress: Address
+  balance: bigint
+  protocol: 'Aave' | 'Morpho'
+  locationLabel: string
+  underlyingAddress: Address
+  underlyingBalance: bigint
+}) {
+  const [{ symbol, name, decimals }, meta, priceUsd] = await Promise.all([
+    readTokenDescriptor(params.underlyingAddress),
+    getCoinGeckoMeta(params.underlyingAddress),
+    getTokenPriceUsd(params.underlyingAddress),
+  ])
+
+  const balance = toNumber(params.underlyingBalance, decimals)
+  const usdValue = balance * priceUsd
+
+  if (usdValue < MIN_HOLDING_USD) {
+    return null
+  }
+
+  return {
+    tokenKey: `${params.protocol.toLowerCase()}:${params.tokenAddress.toLowerCase()}`,
+    symbol: meta.symbol ?? symbol.toUpperCase(),
+    name: meta.name ?? name,
+    address: params.underlyingAddress,
+    balance: balance.toString(),
+    balanceFormatted: formatBalance(params.underlyingBalance, decimals),
+    usdValue,
+    usdValueFormatted: formatUsdValue(usdValue),
+    allocation: usdValue,
+    decimals,
+    logoUrl: meta.logoUrl,
+    coingeckoUrl: meta.coingeckoUrl,
+    isNative: false,
+    protocol: params.protocol,
+    locationLabel: params.locationLabel,
+  } satisfies TreasuryHoldingEntry
+}
+
+async function tryResolveAaveHolding(token: {
+  address: Address
+  balance: bigint
+}) {
+  try {
+    const underlyingAddress = await withRpcRetries(() => publicClient.readContract({
+      address: token.address,
+      abi: aavePositionAbi,
+      functionName: 'UNDERLYING_ASSET_ADDRESS',
+    }) as Promise<Address>)
+
+    return buildProtocolHoldingEntry({
+      tokenAddress: token.address,
+      balance: token.balance,
+      protocol: 'Aave',
+      locationLabel: 'Supplied on Aave',
+      underlyingAddress,
+      underlyingBalance: token.balance,
+    })
+  } catch {
+    return null
+  }
+}
+
+async function tryResolveMorphoHolding(token: {
+  address: Address
+  balance: bigint
+}) {
+  try {
+    await withRpcRetries(() => publicClient.readContract({
+      address: token.address,
+      abi: morphoVaultAbi,
+      functionName: 'MORPHO',
+    }) as Promise<Address>)
+
+    const [underlyingAddress, underlyingBalance] = await Promise.all([
+      withRpcRetries(() => publicClient.readContract({
+        address: token.address,
+        abi: morphoVaultAbi,
+        functionName: 'asset',
+      }) as Promise<Address>),
+      withRpcRetries(() => publicClient.readContract({
+        address: token.address,
+        abi: morphoVaultAbi,
+        functionName: 'convertToAssets',
+        args: [token.balance],
+      }) as Promise<bigint>),
+    ])
+
+    return buildProtocolHoldingEntry({
+      tokenAddress: token.address,
+      balance: token.balance,
+      protocol: 'Morpho',
+      locationLabel: 'Supplied on Morpho',
+      underlyingAddress,
+      underlyingBalance,
+    })
+  } catch {
+    return null
+  }
 }
 
 function isRangeLimitError(message: string) {
@@ -586,6 +727,7 @@ export async function getTreasuryAgentHoldings() {
 
       if (usdValue >= MIN_HOLDING_USD) {
         entries.push({
+          tokenKey: 'native',
           symbol: 'ETH',
           name: nativeMeta.name ?? 'Ethereum',
           address: null,
@@ -598,12 +740,19 @@ export async function getTreasuryAgentHoldings() {
           logoUrl: nativeMeta.logoUrl,
           coingeckoUrl: nativeMeta.coingeckoUrl,
           isNative: true,
+          protocol: null,
+          locationLabel: null,
         })
       }
     }
 
     const tokenEntries = await Promise.all(
       resolvedTokens.map(async (token) => {
+        const protocolEntry = await tryResolveAaveHolding(token) ?? await tryResolveMorphoHolding(token)
+        if (protocolEntry) {
+          return protocolEntry
+        }
+
         const meta = await getCoinGeckoMeta(token.address)
         const priceUsd = await getTokenPriceUsd(token.address)
         const balance = toNumber(token.balance, token.decimals)
@@ -618,6 +767,7 @@ export async function getTreasuryAgentHoldings() {
         }
 
         return {
+          tokenKey: token.address.toLowerCase(),
           symbol: meta.symbol ?? token.symbol.toUpperCase(),
           name: meta.name ?? token.name,
           address: token.address,
@@ -630,6 +780,8 @@ export async function getTreasuryAgentHoldings() {
           logoUrl: meta.logoUrl,
           coingeckoUrl: meta.coingeckoUrl,
           isNative: false,
+          protocol: null,
+          locationLabel: null,
         } satisfies TreasuryHoldingEntry
       })
     )

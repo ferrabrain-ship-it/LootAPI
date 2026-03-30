@@ -85,9 +85,12 @@ type TreasuryAgentLeaderboardRow = {
 
 type TreasuryAgentHoldingRow = {
   wallet_address: string
+  token_key: string
   token_address: string | null
   symbol: string
   name: string
+  protocol: string | null
+  location_label: string | null
   balance: string
   balance_formatted: string
   usd_value: number
@@ -659,9 +662,12 @@ export async function getIndexedTreasuryAgentHoldings() {
       `
         select
           wallet_address,
+          token_key,
           token_address,
           symbol,
           name,
+          protocol,
+          location_label,
           balance::text,
           balance_formatted,
           usd_value,
@@ -679,9 +685,12 @@ export async function getIndexedTreasuryAgentHoldings() {
     return {
       walletAddress: result.rows[0]?.wallet_address ?? null,
       entries: result.rows.map((row) => ({
+        tokenKey: row.token_key,
         symbol: row.symbol,
         name: row.name,
         address: row.token_address ? getAddress(row.token_address) : null,
+        protocol: row.protocol,
+        locationLabel: row.location_label,
         balance: row.balance,
         balanceFormatted: row.balance_formatted,
         usdValue: Number(row.usd_value),
