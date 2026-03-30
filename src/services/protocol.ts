@@ -2160,13 +2160,17 @@ export async function getLeaderboardTreasury(limit = 12) {
 }
 
 export async function getTreasuryHoldings() {
-  return withCache('treasury-holdings', HEAVY_ROUTE_CACHE_TTL_MS, async () => {
-    const indexed = await getIndexedTreasuryAgentHoldings()
-    if (indexed) {
-      return indexed
-    }
+  return withCache('treasury-holdings', 15_000, async () => {
+    try {
+      return await getLiveTreasuryAgentHoldings()
+    } catch (error) {
+      const indexed = await getIndexedTreasuryAgentHoldings()
+      if (indexed) {
+        return indexed
+      }
 
-    return getLiveTreasuryAgentHoldings()
+      throw error
+    }
   })
 }
 
