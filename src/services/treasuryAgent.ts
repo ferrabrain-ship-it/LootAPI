@@ -34,6 +34,9 @@ const ZERO = 0n
 const ONE = 1n
 const BASE_WETH = '0x4200000000000000000000000000000000000006' as Address
 const USDC = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' as Address
+const AERO = '0x940181a94A35A4569E4529A3CDfB74e38FD98631' as Address
+const AERODROME_AERO_USDC_POOL = '0x6cDcb1C4A4D1C3C6d054b27AC5B77e89eAFb971d' as Address
+const AERODROME_AERO_USDC_GAUGE = '0x4F09bAb2f0E15e2A078A227FE1537665F55b8360' as Address
 const LOG_BLOCK_RANGE = 20_000n
 const MIN_LOG_BLOCK_RANGE = 1_000n
 const TREASURY_AGENT_CACHE_TTL_MS = 15_000
@@ -67,6 +70,17 @@ const morphoVaultAbi = parseAbi([
   'function convertToAssets(uint256 shares) view returns (uint256)',
 ])
 
+const aerodromeGaugeAbi = parseAbi([
+  'function balanceOf(address) view returns (uint256)',
+])
+
+const aerodromePoolAbi = parseAbi([
+  'function token0() view returns (address)',
+  'function token1() view returns (address)',
+  'function totalSupply() view returns (uint256)',
+  'function getReserves() view returns (uint112 reserve0, uint112 reserve1, uint32 blockTimestampLast)',
+])
+
 const depositQueuedEvent = parseAbiItem(
   'event UserDepositQueued(address indexed caller, address indexed receiver, uint256 assets)'
 )
@@ -98,6 +112,12 @@ const COINGECKO_FALLBACKS: Record<string, { logoUrl: string; coingeckoUrl: strin
     coingeckoUrl: 'https://www.coingecko.com/en/coins/l2-standard-bridged-weth-base',
     name: 'Wrapped Ether',
     symbol: 'WETH',
+  },
+  [AERO.toLowerCase()]: {
+    logoUrl: 'https://cdn.dexscreener.com/cms/images/f950c4e0a9ded4f6b5c811cf33570a65c6f7ea8630d937cd69065269e9dc3a03?width=800&height=800&quality=95&format=auto',
+    coingeckoUrl: 'https://www.coingecko.com/en/coins/aerodrome-finance',
+    name: 'Aerodrome Finance',
+    symbol: 'AERO',
   },
 }
 
@@ -185,7 +205,7 @@ async function readTokenDescriptor(address: Address) {
 async function buildProtocolHoldingEntry(params: {
   tokenAddress: Address
   balance: bigint
-  protocol: 'Aave' | 'Morpho'
+  protocol: 'Aave' | 'Morpho' | 'Aerodrome'
   locationLabel: string
   underlyingAddress: Address
   underlyingBalance: bigint
@@ -279,6 +299,108 @@ async function tryResolveMorphoHolding(token: {
       underlyingAddress,
       underlyingBalance,
     })
+  } catch {
+    return null
+  }
+}
+
+async function tryResolveAerodromeHolding(token: {
+  address: Address
+  balance: bigint
+  decimals: number
+}, walletAddress: Address) {
+  if (token.address.toLowerCase() !== AERODROME_AERO_USDC_POOL.toLowerCase()) {
+    return null
+  }
+
+  try {
+    const [stakedBalance, totalSupply, reserves, token0Address, token1Address] = await Promise.all([
+      withRpcRetries(() => publicClient.readContract({
+        address: AERODROME_AERO_USDC_GAUGE,
+        abi: aerodromeGaugeAbi,
+        functionName: 'balanceOf',
+        args: [walletAddress],
+      }) as Promise<bigint>),
+      withRpcRetries(() => publicClient.readContract({
+        address: AERODROME_AERO_USDC_POOL,
+        abi: aerodromePoolAbi,
+        functionName: 'totalSupply',
+      }) as Promise<bigint>),
+      withRpcRetries(() => publicClient.readContract({
+        address: AERODROME_AERO_USDC_POOL,
+        abi: aerodromePoolAbi,
+        functionName: 'getReserves',
+      }) as Promise<readonly [bigint, bigint, number]>),
+      withRpcRetries(() => publicClient.readContract({
+        address: AERODROME_AERO_USDC_POOL,
+        abi: aerodromePoolAbi,
+        functionName: 'token0',
+      }) as Promise<Address>),
+      withRpcRetries(() => publicClient.readContract({
+        address: AERODROME_AERO_USDC_POOL,
+        abi: aerodromePoolAbi,
+        functionName: 'token1',
+      }) as Promise<Address>),
+    ])
+
+    if (stakedBalance <= ZERO || totalSupply <= ZERO) {
+      return null
+    }
+
+    const [reserve0, reserve1] = reserves
+    const underlying0 = (reserve0 * stakedBalance) / totalSupply
+    const underlying1 = (reserve1 * stakedBalance) / totalSupply
+
+    const [
+      token0Descriptor,
+      token1Descriptor,
+      token0Meta,
+      token1Meta,
+      token0PriceUsd,
+      token1PriceUsd,
+    ] = await Promise.all([
+      readTokenDescriptor(token0Address),
+      readTokenDescriptor(token1Address),
+      getCoinGeckoMeta(token0Address),
+      getCoinGeckoMeta(token1Address),
+      getTokenPriceUsd(token0Address),
+      getTokenPriceUsd(token1Address),
+    ])
+
+    const token0UsdValue = toNumber(underlying0, token0Descriptor.decimals) * token0PriceUsd
+    const token1UsdValue = toNumber(underlying1, token1Descriptor.decimals) * token1PriceUsd
+    const usdValue = token0UsdValue + token1UsdValue
+
+    if (usdValue < MIN_HOLDING_USD) {
+      return null
+    }
+
+    const token0Symbol = token0Meta.symbol ?? token0Descriptor.symbol.toUpperCase()
+    const token1Symbol = token1Meta.symbol ?? token1Descriptor.symbol.toUpperCase()
+    const pairSymbol = (
+      token0Address.toLowerCase() === USDC.toLowerCase() && token1Address.toLowerCase() === AERO.toLowerCase()
+        ? `${token1Symbol}/${token0Symbol} LP`
+        : `${token0Symbol}/${token1Symbol} LP`
+    )
+    const primaryMeta = token1Address.toLowerCase() === AERO.toLowerCase() ? token1Meta : token0Meta
+
+    return {
+      tokenKey: `aerodrome:${AERODROME_AERO_USDC_GAUGE.toLowerCase()}`,
+      symbol: pairSymbol,
+      name: 'Aerodrome AERO/USDC LP',
+      address: AERODROME_AERO_USDC_POOL,
+      balance: toNumber(stakedBalance, token.decimals).toString(),
+      balanceFormatted: formatBalance(stakedBalance, token.decimals),
+      usdValue,
+      usdValueFormatted: formatUsdValue(usdValue),
+      allocation: usdValue,
+      decimals: token.decimals,
+      logoUrl: primaryMeta.logoUrl,
+      coingeckoUrl: primaryMeta.coingeckoUrl,
+      isNative: false,
+      protocol: 'Aerodrome',
+      locationLabel: 'Staked on Aerodrome',
+    } satisfies TreasuryHoldingEntry
   } catch {
     return null
   }
@@ -703,13 +825,13 @@ export async function getTreasuryAgentHoldings() {
       })
     )
 
-    const resolvedTokens = tokenResults.filter((entry): entry is {
+    const discoveredTokens = tokenResults.filter((entry): entry is {
       address: Address
       balance: bigint
       symbol: string
       name: string
       decimals: number
-    } => Boolean(entry) && (entry?.balance ?? ZERO) > ZERO)
+    } => Boolean(entry))
 
     const prioritizedAddresses = new Set<string>([
       config.asset.toLowerCase(),
@@ -747,10 +869,17 @@ export async function getTreasuryAgentHoldings() {
     }
 
     const tokenEntries = await Promise.all(
-      resolvedTokens.map(async (token) => {
-        const protocolEntry = await tryResolveAaveHolding(token) ?? await tryResolveMorphoHolding(token)
+      discoveredTokens.map(async (token) => {
+        const protocolEntry = (
+          (token.balance > ZERO ? await tryResolveAaveHolding(token) ?? await tryResolveMorphoHolding(token) : null)
+          ?? await tryResolveAerodromeHolding(token, config.multisig)
+        )
         if (protocolEntry) {
           return protocolEntry
+        }
+
+        if (token.balance <= ZERO) {
+          return null
         }
 
         const meta = await getCoinGeckoMeta(token.address)
