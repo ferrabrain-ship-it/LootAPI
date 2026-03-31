@@ -309,8 +309,39 @@ function decodeSigned24(value: bigint) {
   return masked >= 0x800000 ? masked - 0x1000000 : masked
 }
 
-function formatUnderlyingLabel(amount: bigint, decimals: number, symbol: string) {
-  return `${formatBalance(amount, decimals)} ${symbol}`
+function isStablePairSymbol(symbol: string | null | undefined) {
+  const normalized = (symbol ?? '').toUpperCase()
+  return normalized === 'USDC' || normalized === 'USDT' || normalized === 'DAI'
+}
+
+function pickPreferredPairMeta(params: {
+  token0Symbol: string
+  token1Symbol: string
+  token0Meta: { logoUrl: string | null; coingeckoUrl: string | null }
+  token1Meta: { logoUrl: string | null; coingeckoUrl: string | null }
+  token0UsdValue: number
+  token1UsdValue: number
+}) {
+  const token0IsStable = isStablePairSymbol(params.token0Symbol)
+  const token1IsStable = isStablePairSymbol(params.token1Symbol)
+
+  if (params.token0Symbol === 'WETH' || params.token0Symbol === 'ETH') {
+    return params.token0Meta
+  }
+
+  if (params.token1Symbol === 'WETH' || params.token1Symbol === 'ETH') {
+    return params.token1Meta
+  }
+
+  if (!token0IsStable && token1IsStable) {
+    return params.token0Meta
+  }
+
+  if (!token1IsStable && token0IsStable) {
+    return params.token1Meta
+  }
+
+  return params.token0UsdValue >= params.token1UsdValue ? params.token0Meta : params.token1Meta
 }
 
 async function readTokenDescriptor(address: Address) {
@@ -487,12 +518,19 @@ async function buildConcentratedLiquidityEntry(params: {
 
   const token0Symbol = token0Meta.symbol ?? token0Descriptor.symbol.toUpperCase()
   const token1Symbol = token1Meta.symbol ?? token1Descriptor.symbol.toUpperCase()
-  const dominantMeta = token0UsdValue >= token1UsdValue ? token0Meta : token1Meta
+  const preferredMeta = pickPreferredPairMeta({
+    token0Symbol,
+    token1Symbol,
+    token0Meta,
+    token1Meta,
+    token0UsdValue,
+    token1UsdValue,
+  })
 
   return {
     tokenKey: params.tokenKey,
     symbol: params.symbol,
-    name: `${params.name} · ${formatUnderlyingLabel(params.amount0, token0Descriptor.decimals, token0Symbol)} + ${formatUnderlyingLabel(params.amount1, token1Descriptor.decimals, token1Symbol)}`,
+    name: params.name,
     address: params.address,
     balance: '1',
     balanceFormatted: '1',
@@ -500,8 +538,8 @@ async function buildConcentratedLiquidityEntry(params: {
     usdValueFormatted: formatUsdValue(usdValue),
     allocation: usdValue,
     decimals: 0,
-    logoUrl: dominantMeta.logoUrl ?? token0Meta.logoUrl ?? token1Meta.logoUrl,
-    coingeckoUrl: dominantMeta.coingeckoUrl,
+    logoUrl: preferredMeta.logoUrl ?? token0Meta.logoUrl ?? token1Meta.logoUrl,
+    coingeckoUrl: preferredMeta.coingeckoUrl ?? token0Meta.coingeckoUrl ?? token1Meta.coingeckoUrl,
     isNative: false,
     protocol: params.protocol,
     locationLabel: params.locationLabel,
