@@ -2167,6 +2167,11 @@ export async function getLeaderboardTreasury(limit = 12) {
 export async function getTreasuryHoldings() {
   return withCache('treasury-holdings', 15_000, async () => {
     try {
+      const indexed = await getIndexedTreasuryAgentHoldings()
+      if (indexed && Array.isArray(indexed.entries) && indexed.entries.length > 0) {
+        return indexed
+      }
+
       return await getLiveTreasuryAgentHoldings()
     } catch (error) {
       const indexed = await getIndexedTreasuryAgentHoldings()
