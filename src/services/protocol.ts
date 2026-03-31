@@ -9,7 +9,7 @@ import { CONTRACTS, PROTOCOL_CONSTANTS } from '../config/contracts.js'
 import { env } from '../config/env.js'
 import { publicClient } from '../lib/client.js'
 import { countSelectedBlocks, decodeBlockMask, etherFixed, etherString, relativeTime, safeAddressEq, toBigInt } from '../lib/format.js'
-import { getIndexedTreasuryAgentHoldings, getIndexedTreasuryAgentLeaderboard } from './protocolIndex.js'
+import { getIndexedLeaderboardEarners, getIndexedTreasuryAgentHoldings, getIndexedTreasuryAgentLeaderboard } from './protocolIndex.js'
 import { getTreasuryAgentHoldings as getLiveTreasuryAgentHoldings, getTreasuryAgentLeaderboard as getLiveTreasuryAgentLeaderboard } from './treasuryAgent.js'
 
 const DEPLOYED_EVENT = parseAbiItem(
@@ -2106,6 +2106,11 @@ export async function getLeaderboardStakers(limit = 12) {
 
 export async function getLeaderboardEarners(limit = 12) {
   return withCache(`leaderboard-earners:${limit}`, HEAVY_ROUTE_CACHE_TTL_MS, async () => {
+    const indexed = await getIndexedLeaderboardEarners(limit)
+    if (indexed) {
+      return indexed
+    }
+
     const status = await getProtocolStatus()
     if (!status.gameStarted || status.currentRoundId === 0n) {
       return {
