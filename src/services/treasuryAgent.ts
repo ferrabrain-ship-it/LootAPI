@@ -35,6 +35,7 @@ const ONE = 1n
 const BASE_WETH = '0x4200000000000000000000000000000000000006' as Address
 const USDC = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' as Address
 const AERO = '0x940181a94A35A4569E4529A3CDfB74e38FD98631' as Address
+const CBBTC = '0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf' as Address
 const AERODROME_AERO_USDC_POOL = '0x6cDcb1C4A4D1C3C6d054b27AC5B77e89eAFb971d' as Address
 const AERODROME_AERO_USDC_GAUGE = '0x4F09bAb2f0E15e2A078A227FE1537665F55b8360' as Address
 const LOG_BLOCK_RANGE = 20_000n
@@ -118,6 +119,12 @@ const COINGECKO_FALLBACKS: Record<string, { logoUrl: string; coingeckoUrl: strin
     coingeckoUrl: 'https://www.coingecko.com/en/coins/aerodrome-finance',
     name: 'Aerodrome Finance',
     symbol: 'AERO',
+  },
+  [CBBTC.toLowerCase()]: {
+    logoUrl: 'https://coin-images.coingecko.com/coins/images/40143/small/cbbtc.webp?1726136727',
+    coingeckoUrl: 'https://www.coingecko.com/en/coins/coinbase-wrapped-btc',
+    name: 'Coinbase Wrapped BTC',
+    symbol: 'CBBTC',
   },
 }
 
@@ -777,6 +784,7 @@ export async function getTreasuryAgentHoldings() {
       config.asset.toLowerCase(),
       config.loot.toLowerCase(),
       BASE_WETH.toLowerCase(),
+      CBBTC.toLowerCase(),
     ])
     incomingLogs.forEach((log) => {
       if (log.address) candidateAddresses.add(log.address.toLowerCase())
@@ -837,6 +845,7 @@ export async function getTreasuryAgentHoldings() {
       config.asset.toLowerCase(),
       config.loot.toLowerCase(),
       BASE_WETH.toLowerCase(),
+      CBBTC.toLowerCase(),
     ])
 
     const entries: TreasuryHoldingEntry[] = []
