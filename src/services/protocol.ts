@@ -9,7 +9,14 @@ import { CONTRACTS, PROTOCOL_CONSTANTS } from '../config/contracts.js'
 import { env } from '../config/env.js'
 import { publicClient } from '../lib/client.js'
 import { countSelectedBlocks, decodeBlockMask, etherFixed, etherString, relativeTime, safeAddressEq, toBigInt } from '../lib/format.js'
-import { getIndexedLeaderboardEarners, getIndexedTreasuryAgentHoldings, getIndexedTreasuryAgentLeaderboard } from './protocolIndex.js'
+import {
+  getIndexedLeaderboardEarners,
+  getIndexedLeaderboardLockers,
+  getIndexedLeaderboardMiners,
+  getIndexedLeaderboardStakers,
+  getIndexedTreasuryAgentHoldings,
+  getIndexedTreasuryAgentLeaderboard,
+} from './protocolIndex.js'
 import { getTreasuryAgentHoldings as getLiveTreasuryAgentHoldings, getTreasuryAgentLeaderboard as getLiveTreasuryAgentLeaderboard } from './treasuryAgent.js'
 
 const DEPLOYED_EVENT = parseAbiItem(
@@ -2039,9 +2046,14 @@ export async function getLockDistributions(page = 1, limit = 12) {
 
 export async function getLeaderboardLockers(limit = 12) {
   return withCache(`leaderboard-lockers:${limit}`, HEAVY_ROUTE_CACHE_TTL_MS, async () => {
+    const indexed = await getIndexedLeaderboardLockers(limit)
+    if (indexed) {
+      return indexed
+    }
+
     const snapshot = await getLockerSnapshot()
     const lockers = [...snapshot.userLocked.entries()]
-      .filter(([, locked]) => locked > 0n)
+        .filter(([, locked]) => locked > 0n)
       .sort((a, b) => (b[1] > a[1] ? 1 : -1))
       .slice(0, limit)
       .map(([address, locked]) => {
@@ -2061,6 +2073,11 @@ export async function getLeaderboardLockers(limit = 12) {
 
 export async function getLeaderboardMiners(limit = 12) {
   return withCache(`leaderboard-miners:${limit}`, HEAVY_ROUTE_CACHE_TTL_MS, async () => {
+    const indexed = await getIndexedLeaderboardMiners(limit)
+    if (indexed) {
+      return indexed
+    }
+
     const status = await getProtocolStatus()
     if (!status.gameStarted || status.currentRoundId === 0n) {
       return { period: 'all', miners: [], deployers: [] }
@@ -2087,6 +2104,11 @@ export async function getLeaderboardMiners(limit = 12) {
 
 export async function getLeaderboardStakers(limit = 12) {
   return withCache(`leaderboard-stakers:${limit}`, HEAVY_ROUTE_CACHE_TTL_MS, async () => {
+    const indexed = await getIndexedLeaderboardStakers(limit)
+    if (indexed) {
+      return indexed
+    }
+
     const snapshot = await getStakeSnapshot()
     const stakers = [...snapshot.balances.entries()]
         .filter(([, balance]) => balance > 0n)
