@@ -438,7 +438,7 @@ async function getDeploymentsForRounds(client: PoolClient, roundIds: bigint[]) {
         block_timestamp
       from protocol_deployments
       where round_id = any($1::bigint[])
-      order by round_id desc, block_number asc, log_index asc
+      order by protocol_deployments.round_id desc, block_number asc, log_index asc
     `,
     [unique]
   )
@@ -1135,7 +1135,7 @@ export async function getIndexedRounds(page = 1, limit = 12, lootpotOnly = false
           settled_at
         from protocol_rounds
         ${where}
-        order by round_id desc
+        order by protocol_rounds.round_id desc
         limit $1 offset $2
       `,
       params
@@ -1212,7 +1212,7 @@ export async function getIndexedUserHistory(address: Address, limit = 100, round
           block_timestamp
         from protocol_deployments
         where ${clauses.join(' and ')}
-        order by round_id desc, block_number desc, log_index desc
+        order by protocol_deployments.round_id desc, block_number desc, log_index desc
         limit $${values.length}
       `,
       values
