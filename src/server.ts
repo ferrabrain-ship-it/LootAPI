@@ -30,6 +30,7 @@ import {
   getTreasuryHoldings,
   getUserHistory,
   getUserRewards,
+  getUserSummary,
   getUserStake,
   warmProtocolCaches,
 } from './services/protocol.js'
@@ -118,6 +119,11 @@ app.get('/api/rounds', async (req) => {
 app.get('/api/copilot/context', async (req) => {
   const { lookback = '1000' } = req.query as Record<string, string | undefined>
   return getCopilotContext(Number(lookback))
+})
+
+app.get('/api/user/:address', async (req) => {
+  const { address } = req.params as { address: string }
+  return getUserSummary(asAddress(address))
 })
 
 app.get('/api/user/:address/rewards', async (req) => {

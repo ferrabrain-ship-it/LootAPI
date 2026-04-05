@@ -1300,3 +1300,35 @@ export async function getIndexedUserHistory(address: Address, limit = 100, round
     }
   })
 }
+
+export async function getIndexedUserSummary(address: Address) {
+  const normalized = getAddress(address)
+  return withProtocolIndex(['rounds', 'deployments_direct', 'deployments_for'], async (client) => {
+    const result = await client.query<{
+      rounds_played: string
+      rounds_won: string
+      total_deployed: string
+    }>(
+      `
+        select
+          count(*)::text as rounds_played,
+          coalesce(sum(case when (d.block_mask::bigint & (1::bigint << r.winning_block)) != 0 then 1 else 0 end), 0)::text as rounds_won,
+          coalesce(sum(d.total_amount), 0)::text as total_deployed
+        from protocol_deployments d
+        join protocol_rounds r on r.round_id = d.round_id
+        where d.user_address = $1
+          and r.settled = true
+      `,
+      [normalized]
+    )
+
+    const row = result.rows[0]
+    const totalDeployed = row?.total_deployed ?? '0'
+    return {
+      roundsPlayed: Number(row?.rounds_played ?? '0'),
+      roundsWon: Number(row?.rounds_won ?? '0'),
+      totalDeployed,
+      totalDeployedFormatted: etherString(toBigInt(totalDeployed)),
+    }
+  })
+}

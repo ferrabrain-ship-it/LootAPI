@@ -21,6 +21,7 @@ import {
   getIndexedRoundMiners,
   getIndexedRounds,
   getIndexedUserHistory,
+  getIndexedUserSummary,
   getIndexedStakingSnapshot,
   getIndexedTreasuryAgentHoldings,
   getIndexedTreasuryAgentLeaderboard,
@@ -1977,6 +1978,60 @@ export async function getUserRewards(address: Address) {
         netFormatted: etherString(net),
       },
       uncheckpointedRound: pending[3].toString(),
+    }
+  })
+}
+
+export async function getUserSummary(address: Address) {
+  return withCache(`user-summary:${address}`, 10_000, async () => {
+    const [ethBalance, lootBalance, indexedSummary] = await Promise.all([
+      withRpcRetries(() => publicClient.getBalance({ address })),
+      withRpcRetries(() => publicClient.readContract({
+        address: CONTRACTS.loot,
+        abi: lootAbi,
+        functionName: 'balanceOf',
+        args: [address],
+      }) as Promise<bigint>),
+      getIndexedUserSummary(address),
+    ])
+
+    let roundsPlayed = 0
+    let wins = 0
+    let totalDeployed = 0n
+
+    if (indexedSummary) {
+      roundsPlayed = indexedSummary.roundsPlayed
+      wins = indexedSummary.roundsWon
+      totalDeployed = toBigInt(indexedSummary.totalDeployed)
+    } else {
+      const history = await getUserHistory(address, USER_HISTORY_MAX_LIMIT)
+      const historyRows = Array.isArray(history.history) ? history.history : []
+      roundsPlayed = historyRows.length
+      wins = historyRows.reduce((count, row) => {
+        return row?.roundResult?.wonWinningBlock ? count + 1 : count
+      }, 0)
+      totalDeployed = historyRows.reduce((sum, row) => sum + toBigInt(row.totalAmount), 0n)
+    }
+
+    return {
+      address,
+      balances: {
+        loot: lootBalance.toString(),
+        lootFormatted: etherString(lootBalance),
+        eth: ethBalance.toString(),
+        ethFormatted: etherString(ethBalance),
+        // Legacy aliases kept for backward compatibility with older clients.
+        bean: lootBalance.toString(),
+        beanFormatted: etherString(lootBalance),
+        bnb: ethBalance.toString(),
+        bnbFormatted: etherString(ethBalance),
+      },
+      stats: {
+        roundsPlayed,
+        wins,
+        totalDeployed: totalDeployed.toString(),
+        totalDeployedFormatted: etherString(totalDeployed),
+      },
     }
   })
 }
