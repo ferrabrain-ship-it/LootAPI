@@ -110,6 +110,24 @@ type DeploymentSnapshot = {
 type StakeSnapshot = {
   balances: Map<string, bigint>
 }
+type CurrentRoundResponse = {
+  roundId: string
+  startTime: number
+  endTime: number
+  totalDeployed: string
+  totalDeployedFormatted: string
+  lootpotPool: string
+  lootpotPoolFormatted: string
+  settled: boolean
+  blocks: Array<{
+    id: number
+    deployed: string
+    deployedFormatted: string
+    minerCount: number
+  }>
+  userDeployed: string
+  userDeployedFormatted: string
+}
 
 const blockTimestampCache = new Map<string, number>()
 const LOG_BLOCK_RANGE = 10_000n
@@ -971,12 +989,12 @@ function formatCurrentRoundBlocks(blocks: CurrentRoundBlockState[]) {
   }))
 }
 
-async function getCurrentRoundBlocks(roundId: bigint) {
-  const latestBlock = await withRpcRetries(() => publicClient.getBlockNumber())
+async function getCurrentRoundBlocks(roundId: bigint, latestBlock?: bigint) {
+  const resolvedLatestBlock = latestBlock ?? await withRpcRetries(() => publicClient.getBlockNumber())
   const bootstrapLookback = 300n
 
   if (!currentRoundCache || currentRoundCache.roundId !== roundId) {
-    const fromBlock = latestBlock > bootstrapLookback ? latestBlock - bootstrapLookback : 0n
+    const fromBlock = resolvedLatestBlock > bootstrapLookback ? resolvedLatestBlock - bootstrapLookback : 0n
     currentRoundCache = {
       roundId,
       lastScannedBlock: fromBlock > 0n ? fromBlock - 1n : 0n,
@@ -986,21 +1004,21 @@ async function getCurrentRoundBlocks(roundId: bigint) {
   }
 
   const fromBlock = currentRoundCache.lastScannedBlock + 1n
-  if (fromBlock <= latestBlock) {
+  if (fromBlock <= resolvedLatestBlock) {
     const [direct, delegated] = await Promise.all([
       getLogsPaged({
         address: CONTRACTS.gridMining,
         event: DEPLOYED_EVENT,
         args: { roundId },
         fromBlock,
-        toBlock: latestBlock,
+        toBlock: resolvedLatestBlock,
       }),
       getLogsPaged({
         address: CONTRACTS.gridMining,
         event: DEPLOYED_FOR_EVENT,
         args: { roundId },
         fromBlock,
-        toBlock: latestBlock,
+        toBlock: resolvedLatestBlock,
       }),
     ])
 
@@ -1011,7 +1029,7 @@ async function getCurrentRoundBlocks(roundId: bigint) {
       applyDeploymentLogToBlocks(currentRoundCache.blocks, log)
     }
 
-    currentRoundCache.lastScannedBlock = latestBlock
+    currentRoundCache.lastScannedBlock = resolvedLatestBlock
   }
 
   return formatCurrentRoundBlocks(currentRoundCache.blocks)
@@ -1054,69 +1072,79 @@ function computeUserDeployed(mask: bigint, amountPerBlock: bigint) {
 }
 
 export async function getCurrentRound(user?: string) {
-  const cacheKey = user && isAddress(user)
-    ? `current-round:${getAddress(user)}`
-    : 'current-round'
+  const getCurrentRoundBase = () =>
+    withCache('current-round:base', 2_000, async (): Promise<CurrentRoundResponse> => {
+      const [roundInfo, lootpotPool, latestBlock] = await Promise.all([
+        withRpcRetries(() => publicClient.readContract({
+          address: CONTRACTS.gridMining,
+          abi: gridMiningAbi,
+          functionName: 'getCurrentRoundInfo',
+        }) as Promise<[bigint, bigint, bigint, bigint, bigint, boolean]>),
+        withRpcRetries(() => publicClient.readContract({
+          address: CONTRACTS.gridMining,
+          abi: gridMiningAbi,
+          functionName: 'lootpotPool',
+        }) as Promise<bigint>),
+        withRpcRetries(() => publicClient.getBlockNumber()),
+      ])
 
-  return withCache(cacheKey, 2_000, async () => {
-    const [roundInfo, lootpotPool] = await Promise.all([
-      withRpcRetries(() => publicClient.readContract({
-        address: CONTRACTS.gridMining,
-        abi: gridMiningAbi,
-        functionName: 'getCurrentRoundInfo',
-      }) as Promise<[bigint, bigint, bigint, bigint, bigint, boolean]>),
-      withRpcRetries(() => publicClient.readContract({
-        address: CONTRACTS.gridMining,
-        abi: gridMiningAbi,
-        functionName: 'lootpotPool',
-      }) as Promise<bigint>),
-    ])
+      const [roundId, startTime, endTime, totalDeployed] = roundInfo
+      if (roundId === 0n) {
+        return {
+          roundId: '0',
+          startTime: Number(startTime),
+          endTime: Number(endTime),
+          totalDeployed: '0',
+          totalDeployedFormatted: '0',
+          lootpotPool: lootpotPool.toString(),
+          lootpotPoolFormatted: etherString(lootpotPool),
+          settled: false,
+          blocks: Array.from({ length: PROTOCOL_CONSTANTS.gridSize }, (_, id) => ({
+            id,
+            deployed: '0',
+            deployedFormatted: '0',
+            minerCount: 0,
+          })),
+          userDeployed: '0',
+          userDeployedFormatted: '0',
+        }
+      }
 
-    const [roundId, startTime, endTime, totalDeployed] = roundInfo
-    if (roundId === 0n) {
+      const blocks = await getCurrentRoundBlocks(roundId, latestBlock)
+
       return {
-        roundId: '0',
+        roundId: roundId.toString(),
         startTime: Number(startTime),
         endTime: Number(endTime),
-        totalDeployed: '0',
-        totalDeployedFormatted: '0',
+        totalDeployed: totalDeployed.toString(),
+        totalDeployedFormatted: etherString(totalDeployed),
         lootpotPool: lootpotPool.toString(),
         lootpotPoolFormatted: etherString(lootpotPool),
         settled: false,
-        blocks: Array.from({ length: PROTOCOL_CONSTANTS.gridSize }, (_, id) => ({
-          id,
-          deployed: '0',
-          deployedFormatted: '0',
-          minerCount: 0,
-        })),
+        blocks,
         userDeployed: '0',
         userDeployedFormatted: '0',
       }
-    }
+    })
 
-    const blocks = await getCurrentRoundBlocks(roundId)
+  const baseSnapshot = await getCurrentRoundBase()
 
-    let userDeployed = 0n
-    if (user && isAddress(user)) {
-      const minerInfo = await withRpcRetries(() => publicClient.readContract({
-        address: CONTRACTS.gridMining,
-        abi: gridMiningAbi,
-        functionName: 'getMinerInfo',
-        args: [roundId, getAddress(user)],
-      }) as Promise<[bigint, bigint, boolean]>)
-      userDeployed = computeUserDeployed(minerInfo[0], minerInfo[1])
-    }
+  if (!user || !isAddress(user) || baseSnapshot.roundId === '0') {
+    return baseSnapshot
+  }
+
+  const normalizedUser = getAddress(user)
+  return withCache(`current-round:user:${normalizedUser}`, 2_000, async (): Promise<CurrentRoundResponse> => {
+    const minerInfo = await withRpcRetries(() => publicClient.readContract({
+      address: CONTRACTS.gridMining,
+      abi: gridMiningAbi,
+      functionName: 'getMinerInfo',
+      args: [BigInt(baseSnapshot.roundId), normalizedUser],
+    }) as Promise<[bigint, bigint, boolean]>)
+    const userDeployed = computeUserDeployed(minerInfo[0], minerInfo[1])
 
     return {
-      roundId: roundId.toString(),
-      startTime: Number(startTime),
-      endTime: Number(endTime),
-      totalDeployed: totalDeployed.toString(),
-      totalDeployedFormatted: etherString(totalDeployed),
-      lootpotPool: lootpotPool.toString(),
-      lootpotPoolFormatted: etherString(lootpotPool),
-      settled: false,
-      blocks,
+      ...baseSnapshot,
       userDeployed: userDeployed.toString(),
       userDeployedFormatted: etherString(userDeployed),
     }

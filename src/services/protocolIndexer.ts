@@ -335,11 +335,10 @@ async function shouldRefreshTreasurySnapshot(
   return Date.now() - latestUpdatedAtMs >= env.treasuryAgentSnapshotSyncIntervalMs
 }
 
-async function syncDeployments(client: PoolClient, eventName: 'Deployed' | 'DeployedFor') {
+async function syncDeployments(client: PoolClient, eventName: 'Deployed' | 'DeployedFor', latestBlock: bigint) {
   const streamName = eventName === 'Deployed' ? 'deployments_direct' : 'deployments_for'
   const event = eventName === 'Deployed' ? DEPLOYED_EVENT : DEPLOYED_FOR_EVENT
   const lastSyncedBlock = await getLastSyncedBlock(client, streamName)
-  const latestBlock = await withRpcRetries(() => publicClient.getBlockNumber())
   const fromBlock = lastSyncedBlock + 1n
 
   if (fromBlock > latestBlock) {
@@ -393,10 +392,9 @@ async function syncDeployments(client: PoolClient, eventName: 'Deployed' | 'Depl
   return { streamName, inserted: logs.length, latestBlock }
 }
 
-async function syncRoundSettled(client: PoolClient) {
+async function syncRoundSettled(client: PoolClient, latestBlock: bigint) {
   const streamName = 'rounds'
   const lastSyncedBlock = await getLastSyncedBlock(client, streamName)
-  const latestBlock = await withRpcRetries(() => publicClient.getBlockNumber())
   const fromBlock = lastSyncedBlock + 1n
 
   if (fromBlock > latestBlock) {
@@ -476,10 +474,9 @@ async function syncRoundSettled(client: PoolClient) {
   return { streamName, inserted: logs.length, latestBlock }
 }
 
-async function syncCheckpoints(client: PoolClient) {
+async function syncCheckpoints(client: PoolClient, latestBlock: bigint) {
   const streamName = 'checkpoints'
   const lastSyncedBlock = await getLastSyncedBlock(client, streamName)
-  const latestBlock = await withRpcRetries(() => publicClient.getBlockNumber())
   const fromBlock = lastSyncedBlock + 1n
   if (fromBlock > latestBlock) return { streamName, inserted: 0, latestBlock }
 
@@ -523,10 +520,9 @@ async function syncCheckpoints(client: PoolClient) {
   return { streamName, inserted: logs.length, latestBlock }
 }
 
-async function syncClaimedLoot(client: PoolClient) {
+async function syncClaimedLoot(client: PoolClient, latestBlock: bigint) {
   const streamName = 'claimed_loot'
   const lastSyncedBlock = await getLastSyncedBlock(client, streamName)
-  const latestBlock = await withRpcRetries(() => publicClient.getBlockNumber())
   const fromBlock = lastSyncedBlock + 1n
   if (fromBlock > latestBlock) return { streamName, inserted: 0, latestBlock }
 
@@ -572,10 +568,9 @@ async function syncClaimedLoot(client: PoolClient) {
   return { streamName, inserted: logs.length, latestBlock }
 }
 
-async function syncVaultEvents(client: PoolClient) {
+async function syncVaultEvents(client: PoolClient, latestBlock: bigint) {
   const streamName = 'treasury_vault'
   const lastSyncedBlock = await getLastSyncedBlock(client, streamName)
-  const latestBlock = await withRpcRetries(() => publicClient.getBlockNumber())
   const fromBlock = lastSyncedBlock + 1n
   if (fromBlock > latestBlock) return { streamName, inserted: 0, latestBlock }
 
@@ -615,10 +610,9 @@ async function syncVaultEvents(client: PoolClient) {
   return { streamName, inserted: logs.length, latestBlock }
 }
 
-async function syncBuybacks(client: PoolClient) {
+async function syncBuybacks(client: PoolClient, latestBlock: bigint) {
   const streamName = 'treasury_buybacks'
   const lastSyncedBlock = await getLastSyncedBlock(client, streamName)
-  const latestBlock = await withRpcRetries(() => publicClient.getBlockNumber())
   const fromBlock = lastSyncedBlock + 1n
   if (fromBlock > latestBlock) return { streamName, inserted: 0, latestBlock }
 
@@ -662,10 +656,9 @@ async function syncBuybacks(client: PoolClient) {
   return { streamName, inserted: logs.length, latestBlock }
 }
 
-async function syncDirectBurns(client: PoolClient) {
+async function syncDirectBurns(client: PoolClient, latestBlock: bigint) {
   const streamName = 'direct_burns'
   const lastSyncedBlock = await getLastSyncedBlock(client, streamName)
-  const latestBlock = await withRpcRetries(() => publicClient.getBlockNumber())
   const fromBlock = lastSyncedBlock + 1n
   if (fromBlock > latestBlock) return { streamName, inserted: 0, latestBlock }
 
@@ -706,10 +699,9 @@ async function syncDirectBurns(client: PoolClient) {
   return { streamName, inserted: logs.length, latestBlock }
 }
 
-async function syncStakeDeposits(client: PoolClient) {
+async function syncStakeDeposits(client: PoolClient, latestBlock: bigint) {
   const streamName = 'staking_deposits'
   const lastSyncedBlock = await getLastSyncedBlock(client, streamName)
-  const latestBlock = await withRpcRetries(() => publicClient.getBlockNumber())
   const fromBlock = lastSyncedBlock + 1n
   if (fromBlock > latestBlock) return { streamName, inserted: 0, latestBlock }
 
@@ -751,10 +743,9 @@ async function syncStakeDeposits(client: PoolClient) {
   return { streamName, inserted: logs.length, latestBlock }
 }
 
-async function syncStakeWithdrawals(client: PoolClient) {
+async function syncStakeWithdrawals(client: PoolClient, latestBlock: bigint) {
   const streamName = 'staking_withdrawals'
   const lastSyncedBlock = await getLastSyncedBlock(client, streamName)
-  const latestBlock = await withRpcRetries(() => publicClient.getBlockNumber())
   const fromBlock = lastSyncedBlock + 1n
   if (fromBlock > latestBlock) return { streamName, inserted: 0, latestBlock }
 
@@ -796,10 +787,9 @@ async function syncStakeWithdrawals(client: PoolClient) {
   return { streamName, inserted: logs.length, latestBlock }
 }
 
-async function syncStakeCompounds(client: PoolClient) {
+async function syncStakeCompounds(client: PoolClient, latestBlock: bigint) {
   const streamName = 'staking_compounds'
   const lastSyncedBlock = await getLastSyncedBlock(client, streamName)
-  const latestBlock = await withRpcRetries(() => publicClient.getBlockNumber())
   const fromBlock = lastSyncedBlock + 1n
   if (fromBlock > latestBlock) return { streamName, inserted: 0, latestBlock }
 
@@ -843,10 +833,9 @@ async function syncStakeCompounds(client: PoolClient) {
   return { streamName, inserted: logs.length, latestBlock }
 }
 
-async function syncYieldDistributions(client: PoolClient) {
+async function syncYieldDistributions(client: PoolClient, latestBlock: bigint) {
   const streamName = 'staking_yield_distributions'
   const lastSyncedBlock = await getLastSyncedBlock(client, streamName)
-  const latestBlock = await withRpcRetries(() => publicClient.getBlockNumber())
   const fromBlock = lastSyncedBlock + 1n
   if (fromBlock > latestBlock) return { streamName, inserted: 0, latestBlock }
 
@@ -886,10 +875,9 @@ async function syncYieldDistributions(client: PoolClient) {
   return { streamName, inserted: logs.length, latestBlock }
 }
 
-async function syncLockRewards(client: PoolClient) {
+async function syncLockRewards(client: PoolClient, latestBlock: bigint) {
   const streamName = 'lock_reward_notified'
   const lastSyncedBlock = await getLastSyncedBlock(client, streamName)
-  const latestBlock = await withRpcRetries(() => publicClient.getBlockNumber())
   const fromBlock = lastSyncedBlock + 1n
   if (fromBlock > latestBlock) return { streamName, inserted: 0, latestBlock }
 
@@ -1010,9 +998,13 @@ async function syncLockerState(client: PoolClient, streamName: string, logs: Loc
   return { streamName, inserted: logs.length }
 }
 
-async function syncLockerStateEvent(client: PoolClient, streamName: string, event: typeof LOCKED_EVENT | typeof ADDED_TO_LOCK_EVENT | typeof EXTENDED_LOCK_EVENT | typeof UNLOCKED_EVENT) {
+async function syncLockerStateEvent(
+  client: PoolClient,
+  streamName: string,
+  event: typeof LOCKED_EVENT | typeof ADDED_TO_LOCK_EVENT | typeof EXTENDED_LOCK_EVENT | typeof UNLOCKED_EVENT,
+  latestBlock: bigint
+) {
   const lastSyncedBlock = await getLastSyncedBlock(client, streamName)
-  const latestBlock = await withRpcRetries(() => publicClient.getBlockNumber())
   const fromBlock = lastSyncedBlock + 1n
   if (fromBlock > latestBlock) return { streamName, inserted: 0, latestBlock }
 
@@ -1028,10 +1020,9 @@ async function syncLockerStateEvent(client: PoolClient, streamName: string, even
   return { ...result, latestBlock }
 }
 
-async function syncTreasuryAgentLeaderboardSnapshot(client: PoolClient) {
+async function syncTreasuryAgentLeaderboardSnapshot(client: PoolClient, latestBlock: bigint) {
   const streamName = 'treasury_agent_leaderboard'
   const lastSyncedBlock = await getLastSyncedBlock(client, streamName)
-  const latestBlock = await withRpcRetries(() => publicClient.getBlockNumber())
   if (latestBlock <= lastSyncedBlock) {
     return { streamName, inserted: 0, latestBlock }
   }
@@ -1075,10 +1066,9 @@ async function syncTreasuryAgentLeaderboardSnapshot(client: PoolClient) {
   return { streamName, inserted: payload.entries.length, latestBlock }
 }
 
-async function syncTreasuryAgentHoldingsSnapshot(client: PoolClient) {
+async function syncTreasuryAgentHoldingsSnapshot(client: PoolClient, latestBlock: bigint) {
   const streamName = 'treasury_agent_holdings'
   const lastSyncedBlock = await getLastSyncedBlock(client, streamName)
-  const latestBlock = await withRpcRetries(() => publicClient.getBlockNumber())
   if (latestBlock <= lastSyncedBlock) {
     return { streamName, inserted: 0, latestBlock }
   }
@@ -1162,6 +1152,7 @@ export async function runProtocolIndexSyncOnce(options?: {
   const client = await pool.connect()
 
   try {
+    const latestBlock = await withRpcRetries(() => publicClient.getBlockNumber())
     const results: Array<{ streamName: string; inserted: number; latestBlock: bigint }> = []
     const runStream = async (
       label: string,
@@ -1178,31 +1169,82 @@ export async function runProtocolIndexSyncOnce(options?: {
       results.push(result)
     }
 
-    await runStream('rounds', () => syncRoundSettled(client))
-    await runStream('deployments_direct', () => syncDeployments(client, 'Deployed'))
-    await runStream('deployments_for', () => syncDeployments(client, 'DeployedFor'))
-    await runStream('checkpoints', () => syncCheckpoints(client))
-    await runStream('claimed_loot', () => syncClaimedLoot(client))
-    await runStream('treasury_vault', () => syncVaultEvents(client))
-    await runStream('treasury_buybacks', () => syncBuybacks(client))
-    await runStream('direct_burns', () => syncDirectBurns(client))
-    await runStream('staking_deposits', () => syncStakeDeposits(client))
-    await runStream('staking_withdrawals', () => syncStakeWithdrawals(client))
-    await runStream('staking_compounds', () => syncStakeCompounds(client))
-    await runStream('staking_yield_distributions', () => syncYieldDistributions(client))
-    await runStream('lock_reward_notified', () => syncLockRewards(client))
-    await runStream('locker_locked', () => syncLockerStateEvent(client, 'locker_locked', LOCKED_EVENT))
-    await runStream('locker_added', () => syncLockerStateEvent(client, 'locker_added', ADDED_TO_LOCK_EVENT))
-    await runStream('locker_extended', () => syncLockerStateEvent(client, 'locker_extended', EXTENDED_LOCK_EVENT))
-    await runStream('locker_unlocked', () => syncLockerStateEvent(client, 'locker_unlocked', UNLOCKED_EVENT))
-    await runStream('treasury_agent_leaderboard', () => syncTreasuryAgentLeaderboardSnapshot(client))
-    await runStream('treasury_agent_holdings', () => syncTreasuryAgentHoldingsSnapshot(client))
-
+    await runStream('rounds', () => syncRoundSettled(client, latestBlock))
+    await runStream('deployments_direct', () => syncDeployments(client, 'Deployed', latestBlock))
+    await runStream('deployments_for', () => syncDeployments(client, 'DeployedFor', latestBlock))
+    await runStream('checkpoints', () => syncCheckpoints(client, latestBlock))
+    await runStream('claimed_loot', () => syncClaimedLoot(client, latestBlock))
+    await runStream('treasury_vault', () => syncVaultEvents(client, latestBlock))
+    await runStream('treasury_buybacks', () => syncBuybacks(client, latestBlock))
+    await runStream('direct_burns', () => syncDirectBurns(client, latestBlock))
+    await runStream('staking_deposits', () => syncStakeDeposits(client, latestBlock))
+    await runStream('staking_withdrawals', () => syncStakeWithdrawals(client, latestBlock))
+    await runStream('staking_compounds', () => syncStakeCompounds(client, latestBlock))
+    await runStream('staking_yield_distributions', () => syncYieldDistributions(client, latestBlock))
+    await runStream('lock_reward_notified', () => syncLockRewards(client, latestBlock))
+    await runStream('locker_locked', () => syncLockerStateEvent(client, 'locker_locked', LOCKED_EVENT, latestBlock))
+    await runStream('locker_added', () => syncLockerStateEvent(client, 'locker_added', ADDED_TO_LOCK_EVENT, latestBlock))
+    await runStream('locker_extended', () => syncLockerStateEvent(client, 'locker_extended', EXTENDED_LOCK_EVENT, latestBlock))
+    await runStream('locker_unlocked', () => syncLockerStateEvent(client, 'locker_unlocked', UNLOCKED_EVENT, latestBlock))
     const latestSyncedBlock = results.reduce((max, result) => (
       result.latestBlock > max ? result.latestBlock : max
     ), 0n)
 
     logger.info('[protocol-indexer] cycle complete', {
+      latestSyncedBlock: latestSyncedBlock.toString(),
+      streams: results.reduce<Record<string, number>>((acc, item) => {
+        acc[item.streamName] = item.inserted
+        return acc
+      }, {}),
+    })
+
+    return {
+      latestSyncedBlock: latestSyncedBlock.toString(),
+      streams: results.reduce<Record<string, number>>((acc, item) => {
+        acc[item.streamName] = item.inserted
+        return acc
+      }, {}),
+    }
+  } finally {
+    client.release()
+  }
+}
+
+export async function runTreasuryAgentSnapshotSyncOnce(options?: {
+  logger?: Logger
+}) {
+  const logger = options?.logger ?? console
+  await initProtocolIndexSchema()
+
+  const pool = getProtocolIndexPool()
+  const client = await pool.connect()
+
+  try {
+    const latestBlock = await withRpcRetries(() => publicClient.getBlockNumber())
+    const results: Array<{ streamName: string; inserted: number; latestBlock: bigint }> = []
+    const runStream = async (
+      label: string,
+      syncer: () => Promise<{ streamName: string; inserted: number; latestBlock: bigint }>
+    ) => {
+      const startedAt = Date.now()
+      logger.info(`[treasury-agent-snapshots] syncing ${label}...`)
+      const result = await syncer()
+      logger.info(`[treasury-agent-snapshots] synced ${label}`, {
+        inserted: result.inserted,
+        latestBlock: result.latestBlock.toString(),
+        durationMs: Date.now() - startedAt,
+      })
+      results.push(result)
+    }
+
+    await runStream('treasury_agent_leaderboard', () => syncTreasuryAgentLeaderboardSnapshot(client, latestBlock))
+    await runStream('treasury_agent_holdings', () => syncTreasuryAgentHoldingsSnapshot(client, latestBlock))
+
+    const latestSyncedBlock = results.reduce((max, result) => (
+      result.latestBlock > max ? result.latestBlock : max
+    ), 0n)
+
+    logger.info('[treasury-agent-snapshots] cycle complete', {
       latestSyncedBlock: latestSyncedBlock.toString(),
       streams: results.reduce<Record<string, number>>((acc, item) => {
         acc[item.streamName] = item.inserted

@@ -40,6 +40,7 @@ import { createDiscordMetricBotsWorker } from './services/discordMetricBotsWorke
 import { createDiscordPriceCommandBot } from './services/discordPriceCommandBot.js'
 
 const app = Fastify({ logger: true })
+type RoundEventSnapshot = Awaited<ReturnType<typeof getCurrentRound>>
 let lootpotWorkerStopping = false
 let lootpotWorkerTimer: NodeJS.Timeout | null = null
 let cacheWarmTimer: NodeJS.Timeout | null = null
@@ -47,6 +48,10 @@ let cacheWarmerStopping = false
 let cacheWarmerRunning = false
 let agentStatsWorkerStopping = false
 let agentStatsWorkerTimer: NodeJS.Timeout | null = null
+const roundEventClients = new Set<FastifyReply>()
+let roundEventTimer: NodeJS.Timeout | null = null
+let roundEventTickInFlight: Promise<void> | null = null
+let roundEventPrevious: RoundEventSnapshot | null = null
 const discordPriceWorker = createDiscordPriceWorker({ logger: console })
 const discordMetricBotsWorker = createDiscordMetricBotsWorker({ logger: console })
 const discordPriceCommandBot = createDiscordPriceCommandBot({ logger: console })
@@ -191,44 +196,88 @@ function sendSse(reply: FastifyReply, event: string, data: unknown) {
   reply.raw.write(`data: ${JSON.stringify(data)}\n\n`)
 }
 
-app.get('/api/events/rounds', async (_req, reply) => {
-  startSse(reply)
+function broadcastRoundSse(event: string, data: unknown) {
+  for (const client of roundEventClients) {
+    try {
+      sendSse(client, event, data)
+    } catch {
+      roundEventClients.delete(client)
+    }
+  }
+}
 
-  let previous = await getCurrentRound().catch(() => null)
-  sendSse(reply, 'heartbeat', { timestamp: new Date().toISOString() })
-  if (previous) {
-    sendSse(reply, 'roundTransition', await getLatestRoundTransition().catch(() => ({ settled: null, newRound: previous })))
+async function tickRoundEvents() {
+  try {
+    const current = await getCurrentRound()
+    broadcastRoundSse('heartbeat', { timestamp: new Date().toISOString() })
+
+    if (!roundEventPrevious || roundEventPrevious.roundId !== current.roundId) {
+      broadcastRoundSse('roundTransition', await getLatestRoundTransition().catch(() => ({ settled: null, newRound: current })))
+    } else if (
+      roundEventPrevious.totalDeployed !== current.totalDeployed ||
+      JSON.stringify(roundEventPrevious.blocks) !== JSON.stringify(current.blocks)
+    ) {
+      broadcastRoundSse('deployed', {
+        roundId: current.roundId,
+        user: '',
+        totalAmount: '0',
+        isAutoMine: false,
+        totalDeployed: current.totalDeployed,
+        totalDeployedFormatted: current.totalDeployedFormatted,
+        userDeployed: '0',
+        userDeployedFormatted: '0',
+        blocks: current.blocks,
+      })
+    }
+
+    roundEventPrevious = current
+  } catch (error) {
+    broadcastRoundSse('heartbeat', { timestamp: new Date().toISOString(), error: String(error) })
+  }
+}
+
+function ensureRoundEventLoop() {
+  if (roundEventTimer) return
+
+  const run = async () => {
+    if (roundEventTickInFlight) return roundEventTickInFlight
+    roundEventTickInFlight = tickRoundEvents()
+      .finally(() => {
+        roundEventTickInFlight = null
+      })
+    return roundEventTickInFlight
   }
 
-  const timer = setInterval(async () => {
-    try {
-      const current = await getCurrentRound()
-      sendSse(reply, 'heartbeat', { timestamp: new Date().toISOString() })
-
-      if (!previous || previous.roundId !== current.roundId) {
-        sendSse(reply, 'roundTransition', await getLatestRoundTransition())
-      } else if (previous.totalDeployed !== current.totalDeployed || JSON.stringify(previous.blocks) !== JSON.stringify(current.blocks)) {
-        sendSse(reply, 'deployed', {
-          roundId: current.roundId,
-          user: '',
-          totalAmount: '0',
-          isAutoMine: false,
-          totalDeployed: current.totalDeployed,
-          totalDeployedFormatted: current.totalDeployedFormatted,
-          userDeployed: '0',
-          userDeployedFormatted: '0',
-          blocks: current.blocks,
-        })
-      }
-
-      previous = current
-    } catch (error) {
-      sendSse(reply, 'heartbeat', { timestamp: new Date().toISOString(), error: String(error) })
-    }
+  void run()
+  roundEventTimer = setInterval(() => {
+    void run()
   }, 1000)
+}
+
+function maybeStopRoundEventLoop() {
+  if (roundEventClients.size > 0) return
+  if (roundEventTimer) {
+    clearInterval(roundEventTimer)
+    roundEventTimer = null
+  }
+  roundEventPrevious = null
+}
+
+app.get('/api/events/rounds', async (_req, reply) => {
+  startSse(reply)
+  roundEventClients.add(reply)
+  sendSse(reply, 'heartbeat', { timestamp: new Date().toISOString() })
+
+  const initialSnapshot = roundEventPrevious ?? await getCurrentRound().catch(() => null)
+  if (initialSnapshot) {
+    sendSse(reply, 'roundTransition', await getLatestRoundTransition().catch(() => ({ settled: null, newRound: initialSnapshot })))
+  }
+
+  ensureRoundEventLoop()
 
   reply.raw.on('close', () => {
-    clearInterval(timer)
+    roundEventClients.delete(reply)
+    maybeStopRoundEventLoop()
   })
 
   return reply
