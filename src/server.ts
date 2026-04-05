@@ -275,6 +275,8 @@ function stopAgentStatsWorker() {
 }
 
 function startCacheWarmer() {
+  if (!env.enableCacheWarmer) return
+
   cacheWarmerStopping = false
   const schedule = (delayMs: number) => {
     if (cacheWarmerStopping) return
@@ -398,7 +400,7 @@ process.on('SIGINT', () => {
   void discordPriceCommandBot.stop()
 })
 
-app.listen({ port: env.port, host: '0.0.0.0' })
+  app.listen({ port: env.port, host: '0.0.0.0' })
   .then(() => {
     app.log.info(`mineloot-api listening on :${env.port}`)
     startCacheWarmer()

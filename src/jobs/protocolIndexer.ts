@@ -20,6 +20,11 @@ async function main() {
     process.exit(0)
   }
 
+  if (!env.enableProtocolIndexer) {
+    console.info('[protocol-indexer] disabled via ENABLE_PROTOCOL_INDEXER=false')
+    process.exit(0)
+  }
+
   console.info(`[protocol-indexer] starting, poll interval ${env.protocolIndexSyncIntervalMs}ms`)
 
   while (!shuttingDown) {

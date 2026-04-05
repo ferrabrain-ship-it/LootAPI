@@ -311,6 +311,30 @@ async function runWriteQuery(query: string, values: unknown[]) {
   await pool.query(query, values)
 }
 
+async function getLatestUpdatedAtMs(client: PoolClient, tableName: 'protocol_treasury_agent_leaderboard' | 'protocol_treasury_agent_holdings') {
+  const result = await client.query<{ updated_at_ms: string | null }>(
+    `
+      select floor(extract(epoch from max(updated_at)) * 1000)::bigint::text as updated_at_ms
+      from ${tableName}
+    `
+  )
+
+  const raw = result.rows[0]?.updated_at_ms
+  return raw ? Number(raw) : 0
+}
+
+async function shouldRefreshTreasurySnapshot(
+  client: PoolClient,
+  tableName: 'protocol_treasury_agent_leaderboard' | 'protocol_treasury_agent_holdings'
+) {
+  const latestUpdatedAtMs = await getLatestUpdatedAtMs(client, tableName)
+  if (!latestUpdatedAtMs) {
+    return true
+  }
+
+  return Date.now() - latestUpdatedAtMs >= env.treasuryAgentSnapshotSyncIntervalMs
+}
+
 async function syncDeployments(client: PoolClient, eventName: 'Deployed' | 'DeployedFor') {
   const streamName = eventName === 'Deployed' ? 'deployments_direct' : 'deployments_for'
   const event = eventName === 'Deployed' ? DEPLOYED_EVENT : DEPLOYED_FOR_EVENT
@@ -1012,6 +1036,11 @@ async function syncTreasuryAgentLeaderboardSnapshot(client: PoolClient) {
     return { streamName, inserted: 0, latestBlock }
   }
 
+  const shouldRefresh = await shouldRefreshTreasurySnapshot(client, 'protocol_treasury_agent_leaderboard')
+  if (!shouldRefresh) {
+    return { streamName, inserted: 0, latestBlock: lastSyncedBlock }
+  }
+
   const payload = await getTreasuryAgentLeaderboard(500)
 
   await runWriteQuery('delete from protocol_treasury_agent_leaderboard', [])
@@ -1052,6 +1081,11 @@ async function syncTreasuryAgentHoldingsSnapshot(client: PoolClient) {
   const latestBlock = await withRpcRetries(() => publicClient.getBlockNumber())
   if (latestBlock <= lastSyncedBlock) {
     return { streamName, inserted: 0, latestBlock }
+  }
+
+  const shouldRefresh = await shouldRefreshTreasurySnapshot(client, 'protocol_treasury_agent_holdings')
+  if (!shouldRefresh) {
+    return { streamName, inserted: 0, latestBlock: lastSyncedBlock }
   }
 
   const payload = await getTreasuryAgentHoldings()

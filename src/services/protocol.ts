@@ -10,12 +10,21 @@ import { env } from '../config/env.js'
 import { publicClient } from '../lib/client.js'
 import { countSelectedBlocks, decodeBlockMask, etherFixed, etherString, relativeTime, safeAddressEq, toBigInt } from '../lib/format.js'
 import {
+  getIndexedBuybacks,
   getIndexedLeaderboardEarners,
   getIndexedLeaderboardLockers,
   getIndexedLeaderboardMiners,
   getIndexedLeaderboardStakers,
+  getIndexedLockDistributions,
+  getIndexedLockSnapshot,
+  getIndexedRound,
+  getIndexedRoundMiners,
+  getIndexedRounds,
+  getIndexedUserHistory,
+  getIndexedStakingSnapshot,
   getIndexedTreasuryAgentHoldings,
   getIndexedTreasuryAgentLeaderboard,
+  getIndexedTreasuryStats,
 } from './protocolIndex.js'
 import { getTreasuryAgentHoldings as getLiveTreasuryAgentHoldings, getTreasuryAgentLeaderboard as getLiveTreasuryAgentLeaderboard } from './treasuryAgent.js'
 
@@ -149,6 +158,10 @@ async function withCache<T>(key: string, ttlMs: number, loader: () => Promise<T>
 
   inflightCache.set(key, promise)
   return promise
+}
+
+function canUseLiveProtocolFallbacks() {
+  return env.allowLiveProtocolFallbacks || !env.protocolIndexDatabaseUrl.trim()
 }
 
 function normalizeAddress(value: unknown): Address {
@@ -1205,6 +1218,12 @@ async function getRoundState(roundId: bigint) {
 
 export async function getRound(roundIdInput: string | number | bigint) {
   const roundId = BigInt(roundIdInput)
+
+  const indexed = await getIndexedRound(roundId)
+  if (indexed) {
+    return indexed
+  }
+
   const load = async () => {
     const roundState = await getRoundState(roundId)
 
@@ -1274,6 +1293,12 @@ export async function getRound(roundIdInput: string | number | bigint) {
 
 export async function getRoundMiners(roundIdInput: string | number | bigint) {
   const roundId = BigInt(roundIdInput)
+
+  const indexed = await getIndexedRoundMiners(roundId)
+  if (indexed) {
+    return indexed
+  }
+
   const load = async () => {
     const roundState = await getRoundState(roundId)
 
@@ -1340,6 +1365,18 @@ export async function getRoundMiners(roundIdInput: string | number | bigint) {
 
 export async function getRounds(page = 1, limit = 12, lootpotOnly = false) {
   return withCache(`rounds:${page}:${limit}:${lootpotOnly ? 'lootpot' : 'all'}`, HEAVY_ROUTE_CACHE_TTL_MS, async () => {
+    const indexed = await getIndexedRounds(page, limit, lootpotOnly)
+    if (indexed) {
+      return indexed
+    }
+
+    if (lootpotOnly && !canUseLiveProtocolFallbacks()) {
+      return {
+        rounds: [],
+        pagination: { page, limit, total: 0, pages: 1 },
+      }
+    }
+
     const status = await getProtocolStatus()
     if (!status.gameStarted || status.currentRoundId === 0n) {
       return {
@@ -1393,13 +1430,130 @@ export async function getCopilotContext(lookback = 1000) {
 
   return withCache(`copilot-context:${safeLookback}`, 15_000, async () => {
     const status = await getProtocolStatus()
-    const [stats, treasuryStats, stakingStats, lockStats, settledLogs] = await Promise.all([
+    const [stats, treasuryStats, stakingStats, lockStats] = await Promise.all([
       getStats(),
       getTreasuryStats(),
       getStakingStats(),
       getLockStats(),
-      status.gameStarted && status.currentRoundId > 0n ? getRoundSettledLogs() : Promise.resolve([]),
     ])
+
+    if (!canUseLiveProtocolFallbacks()) {
+      const indexedRounds = status.gameStarted && status.currentRoundId > 0n
+        ? await getIndexedRounds(1, Math.min(safeLookback, 100), false)
+        : null
+      const rounds = indexedRounds?.rounds ?? []
+      const winningBlockCounts = Array.from({ length: 25 }, (_, index) => ({
+        block: index + 1,
+        wins: 0,
+        frequencyPct: 0,
+      }))
+
+      let lootpotHits = 0
+      let splitRounds = 0
+      let totalLootpotDistributed = 0n
+
+      for (const round of rounds) {
+        const winningBlock = Number(round.winningBlock)
+        if (winningBlock >= 1 && winningBlock <= 25) {
+          winningBlockCounts[winningBlock - 1].wins += 1
+        }
+
+        if (round.isSplit) splitRounds += 1
+
+        const lootpotAmount = toBigInt(round.lootpotAmount)
+        if (lootpotAmount > 0n) {
+          lootpotHits += 1
+          totalLootpotDistributed += lootpotAmount
+        }
+      }
+
+      const roundsAnalyzed = rounds.length
+      for (const entry of winningBlockCounts) {
+        entry.frequencyPct = roundsAnalyzed > 0
+          ? Number(((entry.wins / roundsAnalyzed) * 100).toFixed(2))
+          : 0
+      }
+
+      const sortedBlocks = [...winningBlockCounts].sort((a, b) => (
+        b.wins === a.wins ? a.block - b.block : b.wins - a.wins
+      ))
+      const latestRound = rounds[0] ?? null
+      const oldestRound = rounds.at(-1) ?? null
+      const lastLootpotRound = rounds.find((round) => toBigInt(round.lootpotAmount) > 0n) ?? null
+      const lastSplitRound = rounds.find((round) => round.isSplit) ?? null
+      const latestRoundTs = latestRound?.settledAt ? new Date(latestRound.settledAt).getTime() : null
+      const oldestRoundTs = oldestRound?.settledAt ? new Date(oldestRound.settledAt).getTime() : null
+      const lastLootpotTs = lastLootpotRound?.settledAt ? new Date(lastLootpotRound.settledAt).getTime() : null
+      const lastSplitTs = lastSplitRound?.settledAt ? new Date(lastSplitRound.settledAt).getTime() : null
+
+      return {
+        metrics: {
+          maxSupply: '3000000',
+          totalMinted: stats.totalMinted,
+          totalMintedFormatted: stats.totalMintedFormatted,
+          lootPriceUsd: stats.loot.priceUsd,
+          totalBurned: treasuryStats.totalBurned,
+          totalBurnedFormatted: treasuryStats.totalBurnedFormatted,
+          totalRevenueEth: treasuryStats.totalVaulted,
+          totalRevenueEthFormatted: treasuryStats.totalVaultedFormatted,
+          totalStaked: stakingStats.totalStaked,
+          totalStakedFormatted: stakingStats.totalStakedFormatted,
+          stakingApr: stakingStats.apr,
+          lockedLoot: lockStats.protocolLocked,
+          lockedLootFormatted: lockStats.protocolLockedFormatted,
+          lockRewardsEth: lockStats.totalNotified,
+          lockRewardsEthFormatted: lockStats.totalNotifiedFormatted,
+          lockClaimedEth: lockStats.totalClaimed,
+          lockClaimedEthFormatted: lockStats.totalClaimedFormatted,
+          lockers: lockStats.lockers,
+          stakerYieldLoot: treasuryStats.totalDistributedToStakers,
+          stakerYieldLootFormatted: treasuryStats.totalDistributedToStakersFormatted,
+        },
+        history: {
+          lookback: safeLookback,
+          roundsAnalyzed,
+          totalSettledRounds: indexedRounds?.pagination.total ?? rounds.length,
+          latestRoundId: latestRound ? Number(latestRound.roundId) : null,
+          latestRoundAt: latestRound?.settledAt ?? null,
+          latestRoundRelative: latestRoundTs ? relativeTime(latestRoundTs) : null,
+          oldestRoundInSampleId: oldestRound ? Number(oldestRound.roundId) : null,
+          oldestRoundInSampleAt: oldestRound?.settledAt ?? null,
+          oldestRoundInSampleRelative: oldestRoundTs ? relativeTime(oldestRoundTs) : null,
+          winningBlockCounts,
+          mostFrequentBlocks: sortedBlocks.slice(0, 3),
+          leastFrequentBlocks: [...sortedBlocks].reverse().slice(0, 3).sort((a, b) => (
+            a.wins === b.wins ? a.block - b.block : a.wins - b.wins
+          )),
+          expectedWinRatePct: Number((100 / 25).toFixed(2)),
+          lootpotHits,
+          splitRounds,
+          totalLootpotDistributed: totalLootpotDistributed.toString(),
+          totalLootpotDistributedFormatted: etherString(totalLootpotDistributed),
+          lastLootpot: lastLootpotRound && lastLootpotTs
+            ? {
+                roundId: Number(lastLootpotRound.roundId),
+                winningBlock: Number(lastLootpotRound.winningBlock),
+                lootpotAmount: toBigInt(lastLootpotRound.lootpotAmount).toString(),
+                lootpotAmountFormatted: lastLootpotRound.lootpotAmountFormatted,
+                timestamp: new Date(lastLootpotTs).toISOString(),
+                relativeTime: relativeTime(lastLootpotTs),
+                txHash: lastLootpotRound.txHash ?? null,
+              }
+            : null,
+          lastSplitRound: lastSplitRound && lastSplitTs
+            ? {
+                roundId: Number(lastSplitRound.roundId),
+                winningBlock: Number(lastSplitRound.winningBlock),
+                timestamp: new Date(lastSplitTs).toISOString(),
+                relativeTime: relativeTime(lastSplitTs),
+                txHash: lastSplitRound.txHash ?? null,
+              }
+            : null,
+        },
+      }
+    }
+
+    const settledLogs = status.gameStarted && status.currentRoundId > 0n ? await getRoundSettledLogs() : []
 
     const orderedSettled = [...settledLogs].sort(compareLogsDesc)
     const slice = orderedSettled.slice(0, safeLookback)
@@ -1520,6 +1674,29 @@ export async function getCopilotContext(lookback = 1000) {
 
 export async function getTreasuryStats() {
   return withCache('treasury-stats', HEAVY_ROUTE_CACHE_TTL_MS, async () => {
+    const indexed = await getIndexedTreasuryStats()
+    if (indexed) {
+      return indexed
+    }
+
+    if (!canUseLiveProtocolFallbacks()) {
+      return {
+        totalVaulted: '0',
+        totalVaultedFormatted: etherString(0n),
+        currentVaulted: '0',
+        currentVaultedFormatted: etherString(0n),
+        totalBurned: '0',
+        totalBurnedFormatted: etherString(0n),
+        buybackBurned: '0',
+        buybackBurnedFormatted: etherString(0n),
+        directBurned: '0',
+        directBurnedFormatted: etherString(0n),
+        totalDistributedToStakers: '0',
+        totalDistributedToStakersFormatted: etherString(0n),
+        totalBuybacks: 0,
+      }
+    }
+
     const status = await getProtocolStatus()
     const [stats, vaultLogs, standaloneBurnLogs] = await Promise.all([
       withRpcRetries(() => publicClient.readContract({
@@ -1555,6 +1732,18 @@ export async function getTreasuryStats() {
 
 export async function getBuybacks(page = 1, limit = 12) {
   return withCache(`buybacks:${page}:${limit}`, HEAVY_ROUTE_CACHE_TTL_MS, async () => {
+    const indexed = await getIndexedBuybacks(page, limit)
+    if (indexed) {
+      return indexed
+    }
+
+    if (!canUseLiveProtocolFallbacks()) {
+      return {
+        buybacks: [],
+        pagination: { page, limit, total: 0, pages: 1 },
+      }
+    }
+
     const [buybackLogs, standaloneBurnLogs] = await Promise.all([
       getBuybackLogs(),
       getStandaloneBurnLogs(),
@@ -1614,7 +1803,37 @@ export async function getBuybacks(page = 1, limit = 12) {
 
 export async function getStakingStats() {
   return withCache('staking-stats', HEAVY_ROUTE_CACHE_TTL_MS, async () => {
-    const [globalStats, stakeTokenBalance, price, yieldLogs] = await Promise.all([
+    const [indexed, price] = await Promise.all([
+      getIndexedStakingSnapshot(),
+      getLootPrice(),
+    ])
+
+    if (indexed) {
+      const totalStaked = toBigInt(indexed.totalStaked)
+      const tvlUsd = Number(formatEther(totalStaked)) * price.priceUsd
+
+      return {
+        ...indexed,
+        contractLootBalance: indexed.totalStaked,
+        contractLootBalanceFormatted: indexed.totalStakedFormatted,
+        tvlUsd: tvlUsd.toFixed(2),
+      }
+    }
+
+    if (!canUseLiveProtocolFallbacks()) {
+      return {
+        totalStaked: '0',
+        totalStakedFormatted: etherString(0n),
+        totalYieldDistributed: '0',
+        totalYieldDistributedFormatted: etherString(0n),
+        contractLootBalance: '0',
+        contractLootBalanceFormatted: etherString(0n),
+        apr: '0.00',
+        tvlUsd: '0.00',
+      }
+    }
+
+    const [globalStats, stakeTokenBalance, yieldLogs] = await Promise.all([
       withRpcRetries(() => publicClient.readContract({
         address: CONTRACTS.staking,
         abi: stakingAbi,
@@ -1626,7 +1845,6 @@ export async function getStakingStats() {
         functionName: 'balanceOf',
         args: [CONTRACTS.staking],
       }) as Promise<bigint>),
-      getLootPrice(),
       getYieldDistributedLogs(),
     ])
 
@@ -1807,6 +2025,25 @@ export async function getAutoMine(address: Address) {
 export async function getUserHistory(address: Address, limit = 100, roundIdFilter?: bigint) {
   const roundKey = roundIdFilter ? roundIdFilter.toString() : 'all'
   return withCache(`user-history:${address}:${limit}:${roundKey}`, 30_000, async () => {
+    const indexed = await getIndexedUserHistory(address, limit, roundIdFilter)
+    if (indexed) {
+      return indexed
+    }
+
+    if (!canUseLiveProtocolFallbacks()) {
+      return {
+        history: [],
+        totals: {
+          totalETHWonFormatted: '0',
+          totalLOOTWonFormatted: '0',
+          totalETHDeployedFormatted: '0',
+          totalPNL: '0',
+          roundsPlayed: 0,
+          roundsWon: 0,
+        },
+      }
+    }
+
     const safeLimit = Math.max(1, Math.min(limit, USER_HISTORY_MAX_LIMIT))
     const status = await getProtocolStatus()
     if (!status.gameStarted || status.currentRoundId === 0n) {
@@ -1920,6 +2157,48 @@ export async function getUserHistory(address: Address, limit = 100, roundIdFilte
 
 export async function getLockStats() {
   return withCache('lock-stats', HEAVY_ROUTE_CACHE_TTL_MS, async () => {
+    const [indexed, lockPrice] = await Promise.all([
+      getIndexedLockSnapshot(),
+      getLootPrice(),
+    ])
+
+    if (indexed) {
+      const totalLocked = toBigInt(indexed.protocolLocked)
+      const lootPriceNative = Number(lockPrice.payload.loot.priceNative ?? '0')
+      const protocolTvlEth = Number(formatEther(totalLocked)) * lootPriceNative
+      const apr = protocolTvlEth > 0
+        ? (Number(formatEther(toBigInt(indexed.distributedInWindow))) * (365 / LOCK_APR_WINDOW_DAYS) / protocolTvlEth) * 100
+        : 0
+
+      return {
+        protocolLocked: indexed.protocolLocked,
+        protocolLockedFormatted: indexed.protocolLockedFormatted,
+        protocolWeight: indexed.protocolWeight,
+        protocolWeightFormatted: indexed.protocolWeightFormatted,
+        totalNotified: indexed.totalNotified,
+        totalNotifiedFormatted: indexed.totalNotifiedFormatted,
+        totalClaimed: '0',
+        totalClaimedFormatted: etherString(0n),
+        lockers: indexed.lockers,
+        apr: apr.toFixed(2),
+      }
+    }
+
+    if (!canUseLiveProtocolFallbacks()) {
+      return {
+        protocolLocked: '0',
+        protocolLockedFormatted: etherString(0n),
+        protocolWeight: '0',
+        protocolWeightFormatted: etherString(0n),
+        totalNotified: '0',
+        totalNotifiedFormatted: etherString(0n),
+        totalClaimed: '0',
+        totalClaimedFormatted: etherString(0n),
+        lockers: 0,
+        apr: '0.00',
+      }
+    }
+
     const [totalLockedResult, totalWeightResult, totalNotifiedResult, totalClaimedResult, snapshotResult, priceResult, rewardLogsResult] = await Promise.allSettled([
       withRpcRetries(() => publicClient.readContract({
         address: CONTRACTS.lootLocker,
@@ -1991,6 +2270,18 @@ export async function getLockStats() {
 
 export async function getLockDistributions(page = 1, limit = 12) {
   return withCache(`lock-distributions:${page}:${limit}`, HEAVY_ROUTE_CACHE_TTL_MS, async () => {
+    const indexed = await getIndexedLockDistributions(page, limit)
+    if (indexed) {
+      return indexed
+    }
+
+    if (!canUseLiveProtocolFallbacks()) {
+      return {
+        distributions: [],
+        pagination: { page, limit, total: 0, pages: 1 },
+      }
+    }
+
     const safePage = Number.isFinite(page) ? Math.max(1, Math.floor(page)) : 1
     const safeLimit = Number.isFinite(limit) ? Math.max(1, Math.min(Math.floor(limit), 100)) : 12
 
@@ -2051,6 +2342,10 @@ export async function getLeaderboardLockers(limit = 12) {
       return indexed
     }
 
+    if (!canUseLiveProtocolFallbacks()) {
+      return { lockers: [] }
+    }
+
     const snapshot = await getLockerSnapshot()
     const lockers = [...snapshot.userLocked.entries()]
         .filter(([, locked]) => locked > 0n)
@@ -2076,6 +2371,10 @@ export async function getLeaderboardMiners(limit = 12) {
     const indexed = await getIndexedLeaderboardMiners(limit)
     if (indexed) {
       return indexed
+    }
+
+    if (!canUseLiveProtocolFallbacks()) {
+      return { period: 'all', miners: [], deployers: [] }
     }
 
     const status = await getProtocolStatus()
@@ -2109,6 +2408,10 @@ export async function getLeaderboardStakers(limit = 12) {
       return indexed
     }
 
+    if (!canUseLiveProtocolFallbacks()) {
+      return { stakers: [] }
+    }
+
     const snapshot = await getStakeSnapshot()
     const stakers = [...snapshot.balances.entries()]
         .filter(([, balance]) => balance > 0n)
@@ -2131,6 +2434,13 @@ export async function getLeaderboardEarners(limit = 12) {
     const indexed = await getIndexedLeaderboardEarners(limit)
     if (indexed) {
       return indexed
+    }
+
+    if (!canUseLiveProtocolFallbacks()) {
+      return {
+        earners: [],
+        pagination: { page: 1, limit, total: 0, pages: 1 },
+      }
     }
 
     const status = await getProtocolStatus()
@@ -2182,6 +2492,10 @@ export async function getLeaderboardTreasury(limit = 12) {
       return indexed
     }
 
+    if (!canUseLiveProtocolFallbacks()) {
+      return { entries: [] }
+    }
+
     return getLiveTreasuryAgentLeaderboard(limit)
   })
 }
@@ -2192,6 +2506,13 @@ export async function getTreasuryHoldings() {
       const indexed = await getIndexedTreasuryAgentHoldings()
       if (indexed && Array.isArray(indexed.entries) && indexed.entries.length > 0) {
         return indexed
+      }
+
+      if (!canUseLiveProtocolFallbacks()) {
+        return {
+          walletAddress: indexed?.walletAddress ?? null,
+          entries: indexed?.entries ?? [],
+        }
       }
 
       return await getLiveTreasuryAgentHoldings()
@@ -2209,28 +2530,13 @@ export async function getTreasuryHoldings() {
 export async function warmProtocolCaches() {
   await Promise.allSettled([
     getProtocolStatus(),
-    getRoundSettledLogs(),
-    getRecentRoundSettledLogs(),
-    getDeploymentSnapshot(),
-    getStakeSnapshot(),
-    getCheckpointLogs(),
-    getLockerSnapshot(),
-    getLockRewardNotifiedLogs(),
-    getVaultLogs(),
-    getStandaloneBurnLogs(),
+    getLootPriceCached(),
+    getCurrentRound(),
   ])
 
   await Promise.allSettled([
-    getStats(),
     getRounds(1, 12, false),
-    getLeaderboardMiners(12),
-    getLeaderboardStakers(12),
-    getLeaderboardLockers(12),
-    getLeaderboardEarners(12),
-    getLeaderboardTreasury(12),
-    getTreasuryHoldings(),
-    getLockDistributions(1, 12),
-    getLockStats(),
+    getRounds(1, 12, true),
   ])
 }
 

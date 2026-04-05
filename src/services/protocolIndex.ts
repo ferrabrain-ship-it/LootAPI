@@ -9,11 +9,12 @@ import { publicClient } from '../lib/client.js'
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000'
 const ONE_ADDRESS = '0x0000000000000000000000000000000000000001'
 const STAKING_APR_WINDOW_DAYS = 7
+const LOCK_APR_WINDOW_DAYS = 7
 const INDEX_ROUNDS_MAX_LAG_BLOCKS = 900n
 const INDEX_TREASURY_MAX_LAG_BLOCKS = 1200n
 const INDEX_TREASURY_AGENT_MAX_LAG_BLOCKS = 1200n
 const INDEX_UNFORGED_MAX_LAG_BLOCKS = 1200n
-const INDEX_HEAD_CACHE_TTL_MS = 5000
+const INDEX_HEAD_CACHE_TTL_MS = 15000
 let latestHeadCache: { expiresAt: number; value: bigint } | null = null
 let currentRoundIdCache: { expiresAt: number; value: bigint } | null = null
 
@@ -763,6 +764,7 @@ export async function getIndexedLockSnapshot() {
       protocol_locked: string
       lockers: string
       total_notified: string
+      distributed_in_window: string
       protocol_weight: string
     }>(`
       with locked as (
@@ -778,16 +780,19 @@ export async function getIndexedLockSnapshot() {
         limit 1
       ),
       rewards as (
-        select coalesce(sum(amount), 0)::text as total_notified
+        select
+          coalesce(sum(amount), 0)::text as total_notified,
+          coalesce(sum(case when block_timestamp >= now() - ($1::text || ' days')::interval then distributed_amount else 0 end), 0)::text as distributed_in_window
         from protocol_lock_reward_notified
       )
       select
         coalesce(sum(case when locked_amount > 0 then locked_amount else 0 end), 0)::text as protocol_locked,
         (count(*) filter (where locked_amount > 0))::text as lockers,
         (select total_notified from rewards),
+        (select distributed_in_window from rewards),
         coalesce((select protocol_weight from latest_weight), '0') as protocol_weight
       from locked
-    `)
+    `, [String(LOCK_APR_WINDOW_DAYS)])
 
     const row = result.rows[0]
     return {
@@ -796,6 +801,8 @@ export async function getIndexedLockSnapshot() {
       lockers: Number(row.lockers),
       totalNotified: row.total_notified,
       totalNotifiedFormatted: etherString(toBigInt(row.total_notified)),
+      distributedInWindow: row.distributed_in_window,
+      distributedInWindowFormatted: etherString(toBigInt(row.distributed_in_window)),
       protocolWeight: row.protocol_weight,
       protocolWeightFormatted: etherString(toBigInt(row.protocol_weight)),
     }
