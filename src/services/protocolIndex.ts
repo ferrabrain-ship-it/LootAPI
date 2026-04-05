@@ -1159,15 +1159,17 @@ export async function getIndexedRounds(page = 1, limit = 12, lootpotOnly = false
       }
     }
 
-    const latestIndexedSettledBlock = rows.rows.reduce((max, row) => {
-      const value = row.settled_block_number ? toBigInt(row.settled_block_number) : 0n
-      return value > max ? value : max
-    }, 0n)
-    if (latestIndexedSettledBlock > 0n) {
-      const latestHead = await getLatestHeadBlock()
-      const lag = latestHead > latestIndexedSettledBlock ? latestHead - latestIndexedSettledBlock : 0n
-      if (lag > INDEX_ROUNDS_MAX_LAG_BLOCKS) {
-        return null
+    if (!lootpotOnly) {
+      const latestIndexedSettledBlock = rows.rows.reduce((max, row) => {
+        const value = row.settled_block_number ? toBigInt(row.settled_block_number) : 0n
+        return value > max ? value : max
+      }, 0n)
+      if (latestIndexedSettledBlock > 0n) {
+        const latestHead = await getLatestHeadBlock()
+        const lag = latestHead > latestIndexedSettledBlock ? latestHead - latestIndexedSettledBlock : 0n
+        if (lag > INDEX_ROUNDS_MAX_LAG_BLOCKS) {
+          return null
+        }
       }
     }
 
@@ -1175,7 +1177,7 @@ export async function getIndexedRounds(page = 1, limit = 12, lootpotOnly = false
       rounds: mapped,
       pagination: { page: safePage, limit: safeLimit, total, pages },
     }
-  }, {
+  }, lootpotOnly ? undefined : {
     maxLagBlocks: INDEX_ROUNDS_MAX_LAG_BLOCKS,
   })
 }
