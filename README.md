@@ -38,9 +38,27 @@ Recommended backend env:
 
 ```env
 LOYALTY_SCAN_START_BLOCK=43103600
+CROWN_SCAN_START_BLOCK=45143591
 ```
 
 If you omit `LOYALTY_SCAN_START_BLOCK`, the API auto-detects the deployment block of the Mineloot contracts and scans from there. That works, but the first requests are slower.
+
+Crown uses `CROWN_SCAN_START_BLOCK` so the protocol indexer can start from the Crown deployment window instead of scanning older mining blocks.
+
+## Crown API
+
+Crown is exposed as read-only API context. Gameplay transactions still go directly from wallet/agent to the Crown and AutoCrown contracts.
+
+Available routes:
+- `GET /api/crown/current?user=0x...`
+- `GET /api/crown/rounds?page=1&limit=10`
+- `GET /api/crown/round/:id`
+- `GET /api/crown/holders?roundId=1&limit=10`
+- `GET /api/crown/activity?roundId=1&limit=20`
+- `GET /api/crown/stats?limit=10`
+- `GET /api/crown/user/:address`
+- `GET /api/crown/autocrown/:address`
+- `GET /api/crown/skill/context?user=0x...`
 
 ## Deploy on Railway
 
@@ -63,6 +81,7 @@ RPC_URL_FALLBACK_1=https://base.llamarpc.com
 RPC_URL_FALLBACK_2=https://rpc.ankr.com/base
 RPC_URL_FALLBACK_3=https://base-rpc.publicnode.com
 LOYALTY_SCAN_START_BLOCK=43103600
+CROWN_SCAN_START_BLOCK=45143591
 SUPABASE_URL=
 SUPABASE_SERVICE_ROLE_KEY=
 DISCORD_BOT_TOKEN=

@@ -213,6 +213,145 @@ alter table protocol_treasury_agent_holdings
 alter table protocol_treasury_agent_holdings
   add column if not exists location_label text;
 
+create table if not exists crown_rounds (
+  round_id bigint primary key,
+  start_time bigint not null default 0,
+  end_time bigint not null default 0,
+  next_roll_at bigint not null default 0,
+  total_sold numeric(78,0) not null default 0,
+  prize_pool numeric(78,0) not null default 0,
+  acc_dividend_per_chest numeric(78,0) not null default 0,
+  holder_count numeric(78,0) not null default 0,
+  vrf_request_id numeric(78,0) not null default 0,
+  vrf_requested_at bigint not null default 0,
+  winning_roll numeric(78,0) not null default 0,
+  current_leader text not null default '0x0000000000000000000000000000000000000000',
+  leader_snapshot text not null default '0x0000000000000000000000000000000000000000',
+  winner text not null default '0x0000000000000000000000000000000000000000',
+  active boolean not null default false,
+  settled boolean not null default false,
+  vrf_pending boolean not null default false,
+  activated_block_number bigint,
+  settled_block_number bigint,
+  settled_tx_hash text,
+  settled_at timestamptz,
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists crown_purchases (
+  tx_hash text not null,
+  log_index integer not null,
+  round_id bigint not null,
+  user_address text not null,
+  price numeric(78,0) not null,
+  total_sold_after numeric(78,0) not null,
+  leader text not null,
+  prize_amount numeric(78,0) not null,
+  dividend_amount numeric(78,0) not null,
+  buyback_amount numeric(78,0) not null,
+  lock_amount numeric(78,0) not null,
+  admin_amount numeric(78,0) not null,
+  block_number bigint not null,
+  block_timestamp timestamptz,
+  primary key (tx_hash, log_index)
+);
+
+create table if not exists crown_batch_purchases (
+  tx_hash text not null,
+  log_index integer not null,
+  round_id bigint not null,
+  user_address text not null,
+  amount numeric(78,0) not null,
+  total_price numeric(78,0) not null,
+  total_sold_after numeric(78,0) not null,
+  leader text not null,
+  block_number bigint not null,
+  block_timestamp timestamptz,
+  primary key (tx_hash, log_index)
+);
+
+create table if not exists crown_roll_events (
+  tx_hash text not null,
+  log_index integer not null,
+  event_name text not null,
+  round_id bigint not null,
+  request_id numeric(78,0),
+  leader_snapshot text,
+  roll numeric(78,0),
+  next_roll_at bigint,
+  block_number bigint not null,
+  block_timestamp timestamptz,
+  primary key (tx_hash, log_index)
+);
+
+create table if not exists crown_claims (
+  tx_hash text not null,
+  log_index integer not null,
+  event_name text not null,
+  user_address text not null,
+  amount numeric(78,0) not null,
+  block_number bigint not null,
+  block_timestamp timestamptz,
+  primary key (tx_hash, log_index)
+);
+
+create table if not exists autocrown_configs (
+  user_address text primary key,
+  active boolean not null default true,
+  open_new_round boolean not null,
+  defend_lead boolean not null,
+  snipe_when_outbid boolean not null,
+  buy_window_seconds integer not null,
+  max_buys_per_tick integer not null,
+  max_buys_per_round integer not null,
+  max_build_price numeric(78,0) not null,
+  max_battle_price numeric(78,0) not null,
+  min_prize_pool numeric(78,0) not null,
+  target_chests numeric(78,0) not null,
+  max_round_spend numeric(78,0) not null,
+  total_budget numeric(78,0) not null,
+  block_number bigint not null,
+  tx_hash text not null,
+  updated_at timestamptz
+);
+
+create table if not exists autocrown_deposits (
+  tx_hash text not null,
+  log_index integer not null,
+  user_address text not null,
+  amount numeric(78,0) not null,
+  new_balance numeric(78,0) not null,
+  block_number bigint not null,
+  block_timestamp timestamptz,
+  primary key (tx_hash, log_index)
+);
+
+create table if not exists autocrown_executions (
+  tx_hash text not null,
+  log_index integer not null,
+  event_name text not null,
+  user_address text not null,
+  round_id bigint not null,
+  amount numeric(78,0) not null,
+  total_price numeric(78,0) not null,
+  executor_fee numeric(78,0) not null,
+  battle_phase boolean not null,
+  deposit_balance numeric(78,0) not null,
+  block_number bigint not null,
+  block_timestamp timestamptz,
+  primary key (tx_hash, log_index)
+);
+
+create table if not exists autocrown_stops (
+  tx_hash text not null,
+  log_index integer not null,
+  user_address text not null,
+  refunded numeric(78,0) not null,
+  block_number bigint not null,
+  block_timestamp timestamptz,
+  primary key (tx_hash, log_index)
+);
+
 create index if not exists idx_protocol_rounds_settled_block
   on protocol_rounds (settled_block_number desc);
 
@@ -264,6 +403,27 @@ create index if not exists idx_protocol_treasury_agent_leaderboard_rank
 
 create index if not exists idx_protocol_treasury_agent_holdings_wallet_allocation
   on protocol_treasury_agent_holdings (wallet_address, allocation desc);
+
+create index if not exists idx_crown_rounds_round_desc
+  on crown_rounds (round_id desc);
+
+create index if not exists idx_crown_purchases_round
+  on crown_purchases (round_id desc, block_number desc, log_index desc);
+
+create index if not exists idx_crown_purchases_user
+  on crown_purchases (user_address, round_id desc, block_number desc, log_index desc);
+
+create index if not exists idx_crown_roll_events_round
+  on crown_roll_events (round_id desc, block_number desc, log_index desc);
+
+create index if not exists idx_crown_claims_user
+  on crown_claims (user_address, block_number desc, log_index desc);
+
+create index if not exists idx_autocrown_configs_active
+  on autocrown_configs (active, updated_at desc);
+
+create index if not exists idx_autocrown_executions_user
+  on autocrown_executions (user_address, round_id desc, block_number desc, log_index desc);
 `
 
 let protocolIndexPool: Pool | null = null

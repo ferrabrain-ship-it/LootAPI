@@ -35,6 +35,16 @@ import {
   warmProtocolCaches,
 } from './services/protocol.js'
 import { getProfile, getProfilesBatch } from './services/profiles.js'
+import {
+  getCrownActivity,
+  getCrownCurrent,
+  getCrownHolders,
+  getCrownRound,
+  getCrownRounds,
+  getCrownSkillContext,
+  getCrownStats,
+  getCrownUser,
+} from './services/crown.js'
 import { runLootpotNotifierOnce } from './services/lootpotNotifier.js'
 import { createDiscordPriceWorker } from './services/discordPriceWorker.js'
 import { createDiscordMetricBotsWorker } from './services/discordMetricBotsWorker.js'
@@ -94,6 +104,55 @@ app.get('/api/staking/:address', async (req) => {
 app.get('/api/automine/:address', async (req) => {
   const { address } = req.params as { address: string }
   return getAutoMine(asAddress(address))
+})
+
+app.get('/api/crown/current', async (req) => {
+  const { user } = req.query as { user?: string }
+  return getCrownCurrent(user ? asAddress(user) : undefined)
+})
+
+app.get('/api/crown/rounds', async (req) => {
+  const { page = '1', limit = '10' } = req.query as Record<string, string | undefined>
+  return getCrownRounds(Number(page), Number(limit))
+})
+
+app.get('/api/crown/round/:id', async (req) => {
+  const { id } = req.params as { id: string }
+  return getCrownRound(id)
+})
+
+app.get('/api/crown/holders', async (req) => {
+  const { roundId, limit = '10' } = req.query as Record<string, string | undefined>
+  return getCrownHolders(roundId, Number(limit))
+})
+
+app.get('/api/crown/activity', async (req) => {
+  const { roundId, limit = '20' } = req.query as Record<string, string | undefined>
+  return getCrownActivity(roundId, Number(limit))
+})
+
+app.get('/api/crown/stats', async (req) => {
+  const { limit = '10' } = req.query as Record<string, string | undefined>
+  return getCrownStats(Number(limit))
+})
+
+app.get('/api/crown/user/:address', async (req) => {
+  const { address } = req.params as { address: string }
+  return getCrownUser(asAddress(address))
+})
+
+app.get('/api/crown/autocrown/:address', async (req) => {
+  const { address } = req.params as { address: string }
+  const user = await getCrownUser(asAddress(address))
+  return {
+    address: user.address,
+    autoCrown: user.autoCrown,
+  }
+})
+
+app.get('/api/crown/skill/context', async (req) => {
+  const { user } = req.query as { user?: string }
+  return getCrownSkillContext(user ? asAddress(user) : undefined)
 })
 
 app.get('/api/round/current', async (req) => {

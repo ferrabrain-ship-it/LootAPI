@@ -65,6 +65,7 @@ export const env = {
   rpcFallback2: process.env.RPC_URL_FALLBACK_2 || 'https://rpc.ankr.com/base/3895500309eb50e81ff7a9a858d4bf1c4d52f4e43ce8526fdd402c1698f180aa',
   rpcFallback3: process.env.RPC_URL_FALLBACK_3 || 'https://lb.drpc.live/base/ApemCwwcnEdhvRuDv6G7yCm1-vp6IsgR8aZHdg7bSgwO',
   scanStartBlock: toBigInt(process.env.LOYALTY_SCAN_START_BLOCK || process.env.DEPLOY_SCAN_START_BLOCK, 0n),
+  crownScanStartBlock: toBigInt(process.env.CROWN_SCAN_START_BLOCK, 45143591n),
   supabaseUrl: process.env.SUPABASE_URL || '',
   supabaseServiceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY || '',
 }

@@ -2,6 +2,7 @@ import type { AbiEvent, Address, Log } from 'viem'
 import { getAddress, parseAbiItem } from 'viem'
 import type { PoolClient } from 'pg'
 import gridMiningAbi from '../abis/GridMining.json' with { type: 'json' }
+import crownAbi from '../abis/Crown.json' with { type: 'json' }
 import { CONTRACTS } from '../config/contracts.js'
 import { env } from '../config/env.js'
 import { publicClient } from '../lib/client.js'
@@ -46,6 +47,33 @@ const EXTENDED_LOCK_EVENT = parseAbiItem(
 const UNLOCKED_EVENT = parseAbiItem(
   'event Unlocked(address indexed user, uint256 indexed lockId, uint256 amount, uint256 newUserWeight, uint256 newTotalWeight)'
 )
+const CROWN_ROUND_ACTIVATED_EVENT = parseAbiItem('event RoundActivated(uint64 indexed roundId, uint256 startTime, uint256 nextRollAt)')
+const CROWN_CHEST_PURCHASED_EVENT = parseAbiItem(
+  'event ChestPurchased(uint64 indexed roundId, address indexed user, uint256 price, uint256 totalSold, address indexed leader, uint256 prizeAmount, uint256 dividendAmount, uint256 buybackAmount, uint256 lockAmount, uint256 adminAmount)'
+)
+const CROWN_CHESTS_PURCHASED_EVENT = parseAbiItem(
+  'event ChestsPurchased(uint64 indexed roundId, address indexed user, uint256 amount, uint256 totalPrice, uint256 totalSold, address indexed leader)'
+)
+const CROWN_ROLL_REQUESTED_EVENT = parseAbiItem(
+  'event RollRequested(uint64 indexed roundId, uint256 requestId, address indexed leaderSnapshot, uint256 nextRollAt)'
+)
+const CROWN_ROLL_RESOLVED_EVENT = parseAbiItem('event RollResolved(uint64 indexed roundId, uint256 roll, uint256 nextRollAt)')
+const CROWN_ROUND_SETTLED_EVENT = parseAbiItem(
+  'event RoundSettled(uint64 indexed roundId, address indexed winner, uint256 prize, uint256 totalSold, uint256 roll)'
+)
+const CROWN_CLAIMED_DIVIDENDS_EVENT = parseAbiItem('event ClaimedDividends(address indexed user, uint256 amount)')
+const CROWN_CLAIMED_PRIZE_EVENT = parseAbiItem('event ClaimedPrize(address indexed user, uint256 amount)')
+const AUTOCROWN_CONFIG_UPDATED_EVENT = parseAbiItem(
+  'event ConfigUpdated(address indexed user, bool openNewRound, bool defendLead, bool snipeWhenOutbid, uint32 buyWindowSeconds, uint32 maxBuysPerTick, uint32 maxBuysPerRound, uint256 maxBuildPrice, uint256 maxBattlePrice, uint256 minPrizePool, uint256 targetChests, uint256 maxRoundSpend, uint256 totalBudget)'
+)
+const AUTOCROWN_DEPOSIT_ADDED_EVENT = parseAbiItem('event DepositAdded(address indexed user, uint256 amount, uint256 newBalance)')
+const AUTOCROWN_EXECUTED_FOR_EVENT = parseAbiItem(
+  'event ExecutedFor(address indexed user, uint64 indexed roundId, uint256 price, uint256 executorFee, bool battlePhase, uint256 depositBalance)'
+)
+const AUTOCROWN_BATCH_EXECUTED_FOR_EVENT = parseAbiItem(
+  'event BatchExecutedFor(address indexed user, uint64 indexed roundId, uint256 amount, uint256 totalPrice, uint256 executorFee, bool battlePhase, uint256 depositBalance)'
+)
+const AUTOCROWN_STOPPED_EVENT = parseAbiItem('event Stopped(address indexed user, uint256 refunded)')
 
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000'
 const LOG_BLOCK_RANGE = 10_000n
@@ -66,6 +94,25 @@ type LockerStateLog =
   | Log<bigint, number, false, typeof ADDED_TO_LOCK_EVENT>
   | Log<bigint, number, false, typeof EXTENDED_LOCK_EVENT>
   | Log<bigint, number, false, typeof UNLOCKED_EVENT>
+
+type CrownRoundStorage = [
+  bigint,
+  bigint,
+  bigint,
+  bigint,
+  bigint,
+  bigint,
+  bigint,
+  bigint,
+  bigint,
+  bigint,
+  Address,
+  Address,
+  Address,
+  boolean,
+  boolean,
+  boolean,
+]
 
 function normalizeAddress(address: string | undefined, label = 'address') {
   if (!address) {
@@ -269,14 +316,14 @@ async function getLogsPaged<TEvent extends AbiEvent | undefined>(
   return chunks.flat()
 }
 
-async function getLastSyncedBlock(client: PoolClient, streamName: string) {
+async function getLastSyncedBlock(client: PoolClient, streamName: string, startBlock = env.scanStartBlock) {
   const result = await client.query<{ last_synced_block: string }>(
     'select last_synced_block::text from protocol_sync_state where stream_name = $1',
     [streamName]
   )
 
   if (!result.rowCount) {
-    return env.scanStartBlock > 0n ? env.scanStartBlock - 1n : 0n
+    return startBlock > 0n ? startBlock - 1n : 0n
   }
 
   return BigInt(result.rows[0].last_synced_block)
@@ -561,6 +608,649 @@ async function syncClaimedLoot(client: PoolClient, latestBlock: bigint) {
         log.blockNumber.toString(),
         timestampMs,
       ]
+    )
+  })
+
+  await updateSyncState(client, streamName, latestBlock)
+  return { streamName, inserted: logs.length, latestBlock }
+}
+
+async function upsertCrownRoundSnapshot(
+  roundId: bigint,
+  options?: {
+    activatedBlockNumber?: bigint | null
+    settledBlockNumber?: bigint | null
+    settledTxHash?: string | null
+    settledAtMs?: number | null
+  }
+) {
+  const round = await withRpcRetries(() => publicClient.readContract({
+    address: CONTRACTS.crown,
+    abi: crownAbi,
+    functionName: 'rounds',
+    args: [roundId],
+  }) as Promise<CrownRoundStorage>)
+
+  await runWriteQuery(
+    `
+      insert into crown_rounds (
+        round_id, start_time, end_time, next_roll_at, total_sold, prize_pool,
+        acc_dividend_per_chest, holder_count, vrf_request_id, vrf_requested_at,
+        winning_roll, current_leader, leader_snapshot, winner, active, settled,
+        vrf_pending, activated_block_number, settled_block_number, settled_tx_hash,
+        settled_at, updated_at
+      )
+      values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,now())
+      on conflict (round_id) do update
+      set start_time = excluded.start_time,
+          end_time = excluded.end_time,
+          next_roll_at = excluded.next_roll_at,
+          total_sold = excluded.total_sold,
+          prize_pool = excluded.prize_pool,
+          acc_dividend_per_chest = excluded.acc_dividend_per_chest,
+          holder_count = excluded.holder_count,
+          vrf_request_id = excluded.vrf_request_id,
+          vrf_requested_at = excluded.vrf_requested_at,
+          winning_roll = excluded.winning_roll,
+          current_leader = excluded.current_leader,
+          leader_snapshot = excluded.leader_snapshot,
+          winner = excluded.winner,
+          active = excluded.active,
+          settled = excluded.settled,
+          vrf_pending = excluded.vrf_pending,
+          activated_block_number = coalesce(excluded.activated_block_number, crown_rounds.activated_block_number),
+          settled_block_number = coalesce(excluded.settled_block_number, crown_rounds.settled_block_number),
+          settled_tx_hash = coalesce(excluded.settled_tx_hash, crown_rounds.settled_tx_hash),
+          settled_at = coalesce(excluded.settled_at, crown_rounds.settled_at),
+          updated_at = excluded.updated_at
+    `,
+    [
+      roundId.toString(),
+      toBigInt(round[0]).toString(),
+      toBigInt(round[1]).toString(),
+      toBigInt(round[2]).toString(),
+      toBigInt(round[3]).toString(),
+      toBigInt(round[4]).toString(),
+      toBigInt(round[5]).toString(),
+      toBigInt(round[6]).toString(),
+      toBigInt(round[7]).toString(),
+      toBigInt(round[8]).toString(),
+      toBigInt(round[9]).toString(),
+      normalizeAddress(round[10]),
+      normalizeAddress(round[11]),
+      normalizeAddress(round[12]),
+      round[13],
+      round[14],
+      round[15],
+      options?.activatedBlockNumber?.toString() ?? null,
+      options?.settledBlockNumber?.toString() ?? null,
+      options?.settledTxHash ?? null,
+      options?.settledAtMs ? new Date(options.settledAtMs).toISOString() : null,
+    ]
+  )
+}
+
+async function syncCrownRoundActivated(client: PoolClient, latestBlock: bigint) {
+  const streamName = 'crown_round_activated'
+  const lastSyncedBlock = await getLastSyncedBlock(client, streamName, env.crownScanStartBlock)
+  const fromBlock = lastSyncedBlock + 1n
+  if (fromBlock > latestBlock) return { streamName, inserted: 0, latestBlock }
+
+  const logs = await getLogsPaged({
+    address: CONTRACTS.crown,
+    event: CROWN_ROUND_ACTIVATED_EVENT,
+    fromBlock,
+    toBlock: latestBlock,
+  })
+
+  await upsertRows(logs, ROW_UPSERT_CONCURRENCY, async (log) => {
+    await upsertCrownRoundSnapshot(toBigInt(log.args.roundId), {
+      activatedBlockNumber: log.blockNumber,
+    })
+  })
+
+  await updateSyncState(client, streamName, latestBlock)
+  return { streamName, inserted: logs.length, latestBlock }
+}
+
+async function syncCrownPurchases(client: PoolClient, latestBlock: bigint) {
+  const streamName = 'crown_purchases'
+  const lastSyncedBlock = await getLastSyncedBlock(client, streamName, env.crownScanStartBlock)
+  const fromBlock = lastSyncedBlock + 1n
+  if (fromBlock > latestBlock) return { streamName, inserted: 0, latestBlock }
+
+  const logs = await getLogsPaged({
+    address: CONTRACTS.crown,
+    event: CROWN_CHEST_PURCHASED_EVENT,
+    fromBlock,
+    toBlock: latestBlock,
+  })
+  const affectedRoundIds = new Set<string>()
+
+  await upsertRows(logs, ROW_UPSERT_CONCURRENCY, async (log) => {
+    const timestampMs = await getBlockTimestampMs(log.blockNumber)
+    const roundId = toBigInt(log.args.roundId)
+    affectedRoundIds.add(roundId.toString())
+    await runWriteQuery(
+      `
+        insert into crown_purchases (
+          tx_hash, log_index, round_id, user_address, price, total_sold_after,
+          leader, prize_amount, dividend_amount, buyback_amount, lock_amount,
+          admin_amount, block_number, block_timestamp
+        )
+        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,to_timestamp($14 / 1000.0))
+        on conflict (tx_hash, log_index) do update
+        set round_id = excluded.round_id,
+            user_address = excluded.user_address,
+            price = excluded.price,
+            total_sold_after = excluded.total_sold_after,
+            leader = excluded.leader,
+            prize_amount = excluded.prize_amount,
+            dividend_amount = excluded.dividend_amount,
+            buyback_amount = excluded.buyback_amount,
+            lock_amount = excluded.lock_amount,
+            admin_amount = excluded.admin_amount,
+            block_number = excluded.block_number,
+            block_timestamp = excluded.block_timestamp
+      `,
+      [
+        log.transactionHash,
+        log.logIndex,
+        roundId.toString(),
+        normalizeAddress(log.args.user, 'crown purchase user'),
+        toBigInt(log.args.price).toString(),
+        toBigInt(log.args.totalSold).toString(),
+        normalizeAddress(log.args.leader, 'crown purchase leader'),
+        toBigInt(log.args.prizeAmount).toString(),
+        toBigInt(log.args.dividendAmount).toString(),
+        toBigInt(log.args.buybackAmount).toString(),
+        toBigInt(log.args.lockAmount).toString(),
+        toBigInt(log.args.adminAmount).toString(),
+        log.blockNumber.toString(),
+        timestampMs,
+      ]
+    )
+  })
+
+  await mapWithConcurrency([...affectedRoundIds], ROUND_READ_CONCURRENCY, async (roundId) => {
+    await upsertCrownRoundSnapshot(BigInt(roundId))
+    return null
+  })
+
+  await updateSyncState(client, streamName, latestBlock)
+  return { streamName, inserted: logs.length, latestBlock }
+}
+
+async function syncCrownBatchPurchases(client: PoolClient, latestBlock: bigint) {
+  const streamName = 'crown_batch_purchases'
+  const lastSyncedBlock = await getLastSyncedBlock(client, streamName, env.crownScanStartBlock)
+  const fromBlock = lastSyncedBlock + 1n
+  if (fromBlock > latestBlock) return { streamName, inserted: 0, latestBlock }
+
+  const logs = await getLogsPaged({
+    address: CONTRACTS.crown,
+    event: CROWN_CHESTS_PURCHASED_EVENT,
+    fromBlock,
+    toBlock: latestBlock,
+  })
+
+  await upsertRows(logs, ROW_UPSERT_CONCURRENCY, async (log) => {
+    const timestampMs = await getBlockTimestampMs(log.blockNumber)
+    await runWriteQuery(
+      `
+        insert into crown_batch_purchases (
+          tx_hash, log_index, round_id, user_address, amount, total_price,
+          total_sold_after, leader, block_number, block_timestamp
+        )
+        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,to_timestamp($10 / 1000.0))
+        on conflict (tx_hash, log_index) do update
+        set round_id = excluded.round_id,
+            user_address = excluded.user_address,
+            amount = excluded.amount,
+            total_price = excluded.total_price,
+            total_sold_after = excluded.total_sold_after,
+            leader = excluded.leader,
+            block_number = excluded.block_number,
+            block_timestamp = excluded.block_timestamp
+      `,
+      [
+        log.transactionHash,
+        log.logIndex,
+        toBigInt(log.args.roundId).toString(),
+        normalizeAddress(log.args.user, 'crown batch user'),
+        toBigInt(log.args.amount).toString(),
+        toBigInt(log.args.totalPrice).toString(),
+        toBigInt(log.args.totalSold).toString(),
+        normalizeAddress(log.args.leader, 'crown batch leader'),
+        log.blockNumber.toString(),
+        timestampMs,
+      ]
+    )
+  })
+
+  await updateSyncState(client, streamName, latestBlock)
+  return { streamName, inserted: logs.length, latestBlock }
+}
+
+async function syncCrownRollRequested(client: PoolClient, latestBlock: bigint) {
+  const streamName = 'crown_roll_requested'
+  const lastSyncedBlock = await getLastSyncedBlock(client, streamName, env.crownScanStartBlock)
+  const fromBlock = lastSyncedBlock + 1n
+  if (fromBlock > latestBlock) return { streamName, inserted: 0, latestBlock }
+
+  const logs = await getLogsPaged({
+    address: CONTRACTS.crown,
+    event: CROWN_ROLL_REQUESTED_EVENT,
+    fromBlock,
+    toBlock: latestBlock,
+  })
+
+  await upsertRows(logs, ROW_UPSERT_CONCURRENCY, async (log) => {
+    const timestampMs = await getBlockTimestampMs(log.blockNumber)
+    const roundId = toBigInt(log.args.roundId)
+    await runWriteQuery(
+      `
+        insert into crown_roll_events (
+          tx_hash, log_index, event_name, round_id, request_id, leader_snapshot,
+          roll, next_roll_at, block_number, block_timestamp
+        )
+        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,to_timestamp($10 / 1000.0))
+        on conflict (tx_hash, log_index) do update
+        set event_name = excluded.event_name,
+            round_id = excluded.round_id,
+            request_id = excluded.request_id,
+            leader_snapshot = excluded.leader_snapshot,
+            next_roll_at = excluded.next_roll_at,
+            block_number = excluded.block_number,
+            block_timestamp = excluded.block_timestamp
+      `,
+      [
+        log.transactionHash,
+        log.logIndex,
+        'RollRequested',
+        roundId.toString(),
+        toBigInt(log.args.requestId).toString(),
+        normalizeAddress(log.args.leaderSnapshot, 'crown roll leader snapshot'),
+        null,
+        toBigInt(log.args.nextRollAt).toString(),
+        log.blockNumber.toString(),
+        timestampMs,
+      ]
+    )
+    await upsertCrownRoundSnapshot(roundId)
+  })
+
+  await updateSyncState(client, streamName, latestBlock)
+  return { streamName, inserted: logs.length, latestBlock }
+}
+
+async function syncCrownRollResolved(client: PoolClient, latestBlock: bigint) {
+  const streamName = 'crown_roll_resolved'
+  const lastSyncedBlock = await getLastSyncedBlock(client, streamName, env.crownScanStartBlock)
+  const fromBlock = lastSyncedBlock + 1n
+  if (fromBlock > latestBlock) return { streamName, inserted: 0, latestBlock }
+
+  const logs = await getLogsPaged({
+    address: CONTRACTS.crown,
+    event: CROWN_ROLL_RESOLVED_EVENT,
+    fromBlock,
+    toBlock: latestBlock,
+  })
+
+  await upsertRows(logs, ROW_UPSERT_CONCURRENCY, async (log) => {
+    const timestampMs = await getBlockTimestampMs(log.blockNumber)
+    const roundId = toBigInt(log.args.roundId)
+    await runWriteQuery(
+      `
+        insert into crown_roll_events (
+          tx_hash, log_index, event_name, round_id, request_id, leader_snapshot,
+          roll, next_roll_at, block_number, block_timestamp
+        )
+        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,to_timestamp($10 / 1000.0))
+        on conflict (tx_hash, log_index) do update
+        set event_name = excluded.event_name,
+            round_id = excluded.round_id,
+            roll = excluded.roll,
+            next_roll_at = excluded.next_roll_at,
+            block_number = excluded.block_number,
+            block_timestamp = excluded.block_timestamp
+      `,
+      [
+        log.transactionHash,
+        log.logIndex,
+        'RollResolved',
+        roundId.toString(),
+        null,
+        null,
+        toBigInt(log.args.roll).toString(),
+        toBigInt(log.args.nextRollAt).toString(),
+        log.blockNumber.toString(),
+        timestampMs,
+      ]
+    )
+    await upsertCrownRoundSnapshot(roundId)
+  })
+
+  await updateSyncState(client, streamName, latestBlock)
+  return { streamName, inserted: logs.length, latestBlock }
+}
+
+async function syncCrownRoundSettled(client: PoolClient, latestBlock: bigint) {
+  const streamName = 'crown_round_settled'
+  const lastSyncedBlock = await getLastSyncedBlock(client, streamName, env.crownScanStartBlock)
+  const fromBlock = lastSyncedBlock + 1n
+  if (fromBlock > latestBlock) return { streamName, inserted: 0, latestBlock }
+
+  const logs = await getLogsPaged({
+    address: CONTRACTS.crown,
+    event: CROWN_ROUND_SETTLED_EVENT,
+    fromBlock,
+    toBlock: latestBlock,
+  })
+
+  await upsertRows(logs, ROW_UPSERT_CONCURRENCY, async (log) => {
+    const timestampMs = await getBlockTimestampMs(log.blockNumber)
+    const roundId = toBigInt(log.args.roundId)
+    await runWriteQuery(
+      `
+        insert into crown_roll_events (
+          tx_hash, log_index, event_name, round_id, request_id, leader_snapshot,
+          roll, next_roll_at, block_number, block_timestamp
+        )
+        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,to_timestamp($10 / 1000.0))
+        on conflict (tx_hash, log_index) do update
+        set event_name = excluded.event_name,
+            round_id = excluded.round_id,
+            roll = excluded.roll,
+            block_number = excluded.block_number,
+            block_timestamp = excluded.block_timestamp
+      `,
+      [
+        log.transactionHash,
+        log.logIndex,
+        'RoundSettled',
+        roundId.toString(),
+        null,
+        normalizeAddress(log.args.winner, 'crown winner'),
+        toBigInt(log.args.roll).toString(),
+        null,
+        log.blockNumber.toString(),
+        timestampMs,
+      ]
+    )
+    await upsertCrownRoundSnapshot(roundId, {
+      settledBlockNumber: log.blockNumber,
+      settledTxHash: log.transactionHash,
+      settledAtMs: timestampMs,
+    })
+  })
+
+  await updateSyncState(client, streamName, latestBlock)
+  return { streamName, inserted: logs.length, latestBlock }
+}
+
+async function syncCrownClaims(client: PoolClient, eventName: 'ClaimedDividends' | 'ClaimedPrize', latestBlock: bigint) {
+  const streamName = eventName === 'ClaimedDividends' ? 'crown_claimed_dividends' : 'crown_claimed_prize'
+  const event = eventName === 'ClaimedDividends' ? CROWN_CLAIMED_DIVIDENDS_EVENT : CROWN_CLAIMED_PRIZE_EVENT
+  const lastSyncedBlock = await getLastSyncedBlock(client, streamName, env.crownScanStartBlock)
+  const fromBlock = lastSyncedBlock + 1n
+  if (fromBlock > latestBlock) return { streamName, inserted: 0, latestBlock }
+
+  const logs = await getLogsPaged({
+    address: CONTRACTS.crown,
+    event,
+    fromBlock,
+    toBlock: latestBlock,
+  })
+
+  await upsertRows(logs, ROW_UPSERT_CONCURRENCY, async (log) => {
+    const timestampMs = await getBlockTimestampMs(log.blockNumber)
+    await runWriteQuery(
+      `
+        insert into crown_claims (
+          tx_hash, log_index, event_name, user_address, amount, block_number, block_timestamp
+        )
+        values ($1,$2,$3,$4,$5,$6,to_timestamp($7 / 1000.0))
+        on conflict (tx_hash, log_index) do update
+        set event_name = excluded.event_name,
+            user_address = excluded.user_address,
+            amount = excluded.amount,
+            block_number = excluded.block_number,
+            block_timestamp = excluded.block_timestamp
+      `,
+      [
+        log.transactionHash,
+        log.logIndex,
+        eventName,
+        normalizeAddress(log.args.user, 'crown claim user'),
+        toBigInt(log.args.amount).toString(),
+        log.blockNumber.toString(),
+        timestampMs,
+      ]
+    )
+  })
+
+  await updateSyncState(client, streamName, latestBlock)
+  return { streamName, inserted: logs.length, latestBlock }
+}
+
+async function syncAutoCrownConfigUpdated(client: PoolClient, latestBlock: bigint) {
+  const streamName = 'autocrown_config_updated'
+  const lastSyncedBlock = await getLastSyncedBlock(client, streamName, env.crownScanStartBlock)
+  const fromBlock = lastSyncedBlock + 1n
+  if (fromBlock > latestBlock) return { streamName, inserted: 0, latestBlock }
+
+  const logs = await getLogsPaged({
+    address: CONTRACTS.autoCrown,
+    event: AUTOCROWN_CONFIG_UPDATED_EVENT,
+    fromBlock,
+    toBlock: latestBlock,
+  })
+
+  await upsertRows(logs, ROW_UPSERT_CONCURRENCY, async (log) => {
+    const timestampMs = await getBlockTimestampMs(log.blockNumber)
+    await runWriteQuery(
+      `
+        insert into autocrown_configs (
+          user_address, active, open_new_round, defend_lead, snipe_when_outbid,
+          buy_window_seconds, max_buys_per_tick, max_buys_per_round,
+          max_build_price, max_battle_price, min_prize_pool, target_chests,
+          max_round_spend, total_budget, block_number, tx_hash, updated_at
+        )
+        values ($1,true,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,to_timestamp($16 / 1000.0))
+        on conflict (user_address) do update
+        set active = excluded.active,
+            open_new_round = excluded.open_new_round,
+            defend_lead = excluded.defend_lead,
+            snipe_when_outbid = excluded.snipe_when_outbid,
+            buy_window_seconds = excluded.buy_window_seconds,
+            max_buys_per_tick = excluded.max_buys_per_tick,
+            max_buys_per_round = excluded.max_buys_per_round,
+            max_build_price = excluded.max_build_price,
+            max_battle_price = excluded.max_battle_price,
+            min_prize_pool = excluded.min_prize_pool,
+            target_chests = excluded.target_chests,
+            max_round_spend = excluded.max_round_spend,
+            total_budget = excluded.total_budget,
+            block_number = excluded.block_number,
+            tx_hash = excluded.tx_hash,
+            updated_at = excluded.updated_at
+      `,
+      [
+        normalizeAddress(log.args.user, 'autocrown config user'),
+        Boolean(log.args.openNewRound),
+        Boolean(log.args.defendLead),
+        Boolean(log.args.snipeWhenOutbid),
+        Number(toBigInt(log.args.buyWindowSeconds)),
+        Number(toBigInt(log.args.maxBuysPerTick)),
+        Number(toBigInt(log.args.maxBuysPerRound)),
+        toBigInt(log.args.maxBuildPrice).toString(),
+        toBigInt(log.args.maxBattlePrice).toString(),
+        toBigInt(log.args.minPrizePool).toString(),
+        toBigInt(log.args.targetChests).toString(),
+        toBigInt(log.args.maxRoundSpend).toString(),
+        toBigInt(log.args.totalBudget).toString(),
+        log.blockNumber.toString(),
+        log.transactionHash,
+        timestampMs,
+      ]
+    )
+  })
+
+  await updateSyncState(client, streamName, latestBlock)
+  return { streamName, inserted: logs.length, latestBlock }
+}
+
+async function syncAutoCrownDeposits(client: PoolClient, latestBlock: bigint) {
+  const streamName = 'autocrown_deposits'
+  const lastSyncedBlock = await getLastSyncedBlock(client, streamName, env.crownScanStartBlock)
+  const fromBlock = lastSyncedBlock + 1n
+  if (fromBlock > latestBlock) return { streamName, inserted: 0, latestBlock }
+
+  const logs = await getLogsPaged({
+    address: CONTRACTS.autoCrown,
+    event: AUTOCROWN_DEPOSIT_ADDED_EVENT,
+    fromBlock,
+    toBlock: latestBlock,
+  })
+
+  await upsertRows(logs, ROW_UPSERT_CONCURRENCY, async (log) => {
+    const timestampMs = await getBlockTimestampMs(log.blockNumber)
+    await runWriteQuery(
+      `
+        insert into autocrown_deposits (
+          tx_hash, log_index, user_address, amount, new_balance, block_number, block_timestamp
+        )
+        values ($1,$2,$3,$4,$5,$6,to_timestamp($7 / 1000.0))
+        on conflict (tx_hash, log_index) do update
+        set user_address = excluded.user_address,
+            amount = excluded.amount,
+            new_balance = excluded.new_balance,
+            block_number = excluded.block_number,
+            block_timestamp = excluded.block_timestamp
+      `,
+      [
+        log.transactionHash,
+        log.logIndex,
+        normalizeAddress(log.args.user, 'autocrown deposit user'),
+        toBigInt(log.args.amount).toString(),
+        toBigInt(log.args.newBalance).toString(),
+        log.blockNumber.toString(),
+        timestampMs,
+      ]
+    )
+  })
+
+  await updateSyncState(client, streamName, latestBlock)
+  return { streamName, inserted: logs.length, latestBlock }
+}
+
+async function syncAutoCrownExecutedFor(client: PoolClient, eventName: 'ExecutedFor' | 'BatchExecutedFor', latestBlock: bigint) {
+  const isBatch = eventName === 'BatchExecutedFor'
+  const streamName = isBatch ? 'autocrown_batch_executed_for' : 'autocrown_executed_for'
+  const event = isBatch ? AUTOCROWN_BATCH_EXECUTED_FOR_EVENT : AUTOCROWN_EXECUTED_FOR_EVENT
+  const lastSyncedBlock = await getLastSyncedBlock(client, streamName, env.crownScanStartBlock)
+  const fromBlock = lastSyncedBlock + 1n
+  if (fromBlock > latestBlock) return { streamName, inserted: 0, latestBlock }
+
+  const logs = await getLogsPaged({
+    address: CONTRACTS.autoCrown,
+    event,
+    fromBlock,
+    toBlock: latestBlock,
+  })
+
+  await upsertRows(logs, ROW_UPSERT_CONCURRENCY, async (log) => {
+    const timestampMs = await getBlockTimestampMs(log.blockNumber)
+    const args = log.args as Record<string, unknown>
+    await runWriteQuery(
+      `
+        insert into autocrown_executions (
+          tx_hash, log_index, event_name, user_address, round_id, amount,
+          total_price, executor_fee, battle_phase, deposit_balance,
+          block_number, block_timestamp
+        )
+        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,to_timestamp($12 / 1000.0))
+        on conflict (tx_hash, log_index) do update
+        set event_name = excluded.event_name,
+            user_address = excluded.user_address,
+            round_id = excluded.round_id,
+            amount = excluded.amount,
+            total_price = excluded.total_price,
+            executor_fee = excluded.executor_fee,
+            battle_phase = excluded.battle_phase,
+            deposit_balance = excluded.deposit_balance,
+            block_number = excluded.block_number,
+            block_timestamp = excluded.block_timestamp
+      `,
+      [
+        log.transactionHash,
+        log.logIndex,
+        eventName,
+        normalizeAddress(args.user as string | undefined, 'autocrown execution user'),
+        toBigInt(args.roundId).toString(),
+        isBatch ? toBigInt(args.amount).toString() : '1',
+        isBatch ? toBigInt(args.totalPrice).toString() : toBigInt(args.price).toString(),
+        toBigInt(args.executorFee).toString(),
+        Boolean(args.battlePhase),
+        toBigInt(args.depositBalance).toString(),
+        log.blockNumber.toString(),
+        timestampMs,
+      ]
+    )
+  })
+
+  await updateSyncState(client, streamName, latestBlock)
+  return { streamName, inserted: logs.length, latestBlock }
+}
+
+async function syncAutoCrownStops(client: PoolClient, latestBlock: bigint) {
+  const streamName = 'autocrown_stops'
+  const lastSyncedBlock = await getLastSyncedBlock(client, streamName, env.crownScanStartBlock)
+  const fromBlock = lastSyncedBlock + 1n
+  if (fromBlock > latestBlock) return { streamName, inserted: 0, latestBlock }
+
+  const logs = await getLogsPaged({
+    address: CONTRACTS.autoCrown,
+    event: AUTOCROWN_STOPPED_EVENT,
+    fromBlock,
+    toBlock: latestBlock,
+  })
+
+  await upsertRows(logs, ROW_UPSERT_CONCURRENCY, async (log) => {
+    const timestampMs = await getBlockTimestampMs(log.blockNumber)
+    const user = normalizeAddress(log.args.user, 'autocrown stopped user')
+    await runWriteQuery(
+      `
+        insert into autocrown_stops (
+          tx_hash, log_index, user_address, refunded, block_number, block_timestamp
+        )
+        values ($1,$2,$3,$4,$5,to_timestamp($6 / 1000.0))
+        on conflict (tx_hash, log_index) do update
+        set user_address = excluded.user_address,
+            refunded = excluded.refunded,
+            block_number = excluded.block_number,
+            block_timestamp = excluded.block_timestamp
+      `,
+      [
+        log.transactionHash,
+        log.logIndex,
+        user,
+        toBigInt(log.args.refunded).toString(),
+        log.blockNumber.toString(),
+        timestampMs,
+      ]
+    )
+    await runWriteQuery(
+      `
+        update autocrown_configs
+        set active = false,
+            block_number = $2,
+            tx_hash = $3,
+            updated_at = to_timestamp($4 / 1000.0)
+        where user_address = $1
+      `,
+      [user, log.blockNumber.toString(), log.transactionHash, timestampMs]
     )
   })
 
@@ -1174,6 +1864,19 @@ export async function runProtocolIndexSyncOnce(options?: {
     await runStream('deployments_for', () => syncDeployments(client, 'DeployedFor', latestBlock))
     await runStream('checkpoints', () => syncCheckpoints(client, latestBlock))
     await runStream('claimed_loot', () => syncClaimedLoot(client, latestBlock))
+    await runStream('crown_round_activated', () => syncCrownRoundActivated(client, latestBlock))
+    await runStream('crown_purchases', () => syncCrownPurchases(client, latestBlock))
+    await runStream('crown_batch_purchases', () => syncCrownBatchPurchases(client, latestBlock))
+    await runStream('crown_roll_requested', () => syncCrownRollRequested(client, latestBlock))
+    await runStream('crown_roll_resolved', () => syncCrownRollResolved(client, latestBlock))
+    await runStream('crown_round_settled', () => syncCrownRoundSettled(client, latestBlock))
+    await runStream('crown_claimed_dividends', () => syncCrownClaims(client, 'ClaimedDividends', latestBlock))
+    await runStream('crown_claimed_prize', () => syncCrownClaims(client, 'ClaimedPrize', latestBlock))
+    await runStream('autocrown_config_updated', () => syncAutoCrownConfigUpdated(client, latestBlock))
+    await runStream('autocrown_deposits', () => syncAutoCrownDeposits(client, latestBlock))
+    await runStream('autocrown_executed_for', () => syncAutoCrownExecutedFor(client, 'ExecutedFor', latestBlock))
+    await runStream('autocrown_batch_executed_for', () => syncAutoCrownExecutedFor(client, 'BatchExecutedFor', latestBlock))
+    await runStream('autocrown_stops', () => syncAutoCrownStops(client, latestBlock))
     await runStream('treasury_vault', () => syncVaultEvents(client, latestBlock))
     await runStream('treasury_buybacks', () => syncBuybacks(client, latestBlock))
     await runStream('direct_burns', () => syncDirectBurns(client, latestBlock))
