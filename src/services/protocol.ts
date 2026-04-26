@@ -511,7 +511,16 @@ function emptyPricePayload() {
   }
 }
 
-function formatPricePayload(priceUsd: number, pairs: Array<{ priceUsd?: string; priceNative?: string; volume?: { h24?: number }; liquidity?: { usd?: number }; priceChange?: { h24?: number }; fdv?: number }>) {
+type DexScreenerPair = {
+  priceUsd?: string
+  priceNative?: string
+  volume?: { h24?: number }
+  liquidity?: { usd?: number }
+  priceChange?: { h24?: number }
+  fdv?: number
+}
+
+function formatPricePayload(priceUsd: number, pairs: DexScreenerPair[]) {
   const best = [...pairs].sort((a, b) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0))[0]
   return {
     loot: {
@@ -524,6 +533,16 @@ function formatPricePayload(priceUsd: number, pairs: Array<{ priceUsd?: string; 
     },
     fetchedAt: new Date().toISOString(),
   }
+}
+
+async function fetchDexScreenerPairs(url: string): Promise<DexScreenerPair[]> {
+  const res = await fetch(url, { cache: 'no-store' })
+  if (!res.ok) return []
+  const data = await res.json()
+  if (Array.isArray(data)) return data as DexScreenerPair[]
+  if (Array.isArray(data.pairs)) return data.pairs as DexScreenerPair[]
+  if (data.pair) return [data.pair as DexScreenerPair]
+  return []
 }
 
 async function getProtocolStatus() {
@@ -561,19 +580,23 @@ async function isRecentRound(roundId: bigint) {
 
 export async function getLootPrice() {
   try {
-    const res = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${CONTRACTS.loot}`, { cache: 'no-store' })
-    if (!res.ok) {
+    let pairs = await fetchDexScreenerPairs(`https://api.dexscreener.com/latest/dex/tokens/${CONTRACTS.loot}`)
+    let best = [...pairs].sort((a, b) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0))[0]
+    let priceUsd = Number(best?.priceUsd ?? 0)
+
+    if (!pairs.length || !Number.isFinite(priceUsd) || priceUsd <= 0) {
+      pairs = await fetchDexScreenerPairs(`https://api.dexscreener.com/token-pairs/v1/base/${CONTRACTS.loot}`)
+      best = [...pairs].sort((a, b) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0))[0]
+      priceUsd = Number(best?.priceUsd ?? 0)
+    }
+
+    if (!pairs.length || !Number.isFinite(priceUsd) || priceUsd <= 0) {
       return emptyPricePayload()
     }
-    const data = await res.json()
-    const pairs = (data.pairs ?? []) as Array<{ priceUsd?: string; priceNative?: string; volume?: { h24?: number }; liquidity?: { usd?: number }; priceChange?: { h24?: number }; fdv?: number }>
-    if (!pairs.length) {
-      return emptyPricePayload()
-    }
-    const best = [...pairs].sort((a, b) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0))[0]
+
     return {
-      priceUsd: Number(best?.priceUsd ?? 0),
-      payload: formatPricePayload(Number(best?.priceUsd ?? 0), pairs),
+      priceUsd,
+      payload: formatPricePayload(priceUsd, pairs),
     }
   } catch {
     return emptyPricePayload()
