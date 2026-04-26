@@ -15,6 +15,7 @@ const INDEX_TREASURY_MAX_LAG_BLOCKS = 1200n
 const INDEX_TREASURY_AGENT_MAX_LAG_BLOCKS = 1200n
 const INDEX_UNFORGED_MAX_LAG_BLOCKS = 1200n
 const INDEX_HEAD_CACHE_TTL_MS = 15000
+const CROWN_BUYBACK_VAULT = '0x4310a93089922ee9e20796fc3bff82c56bf4f6fb'
 let latestHeadCache: { expiresAt: number; value: bigint } | null = null
 let currentRoundIdCache: { expiresAt: number; value: bigint } | null = null
 
@@ -538,7 +539,7 @@ export async function getIndexedTreasuryStats() {
 }
 
 export async function getIndexedBuybacks(page = 1, limit = 12) {
-  return withProtocolIndex(['treasury_buybacks', 'direct_burns'], async (client) => {
+  return withProtocolIndex(['treasury_buybacks', 'direct_burns', 'crown_purchases'], async (client) => {
     const safePage = Number.isFinite(page) ? Math.max(1, Math.floor(page)) : 1
     const safeLimit = Number.isFinite(limit) ? Math.max(1, Math.min(Math.floor(limit), 100)) : 12
     const offset = (safePage - 1) * safeLimit
@@ -566,7 +567,23 @@ export async function getIndexedBuybacks(page = 1, limit = 12) {
             b.log_index,
             b.block_number::text,
             b.block_timestamp,
-            null::text as eth_spent,
+            case
+              when lower(b.from_address) = lower($3) then (
+                select coalesce(sum(cp.buyback_amount), 0)::text
+                from crown_purchases cp
+                where cp.block_number <= b.block_number
+                  and cp.block_number > coalesce((
+                    select max(prev.block_number)
+                    from protocol_direct_burns prev
+                    where lower(prev.from_address) = lower($3)
+                      and (
+                        prev.block_number < b.block_number
+                        or (prev.block_number = b.block_number and prev.log_index < b.log_index)
+                      )
+                  ), 0)
+              )
+              else null::text
+            end as eth_spent,
             null::text as loot_received,
             b.value::text as loot_burned,
             null::text as loot_to_stakers,
@@ -600,7 +617,7 @@ export async function getIndexedBuybacks(page = 1, limit = 12) {
         order by block_number::bigint desc, log_index desc
         limit $1 offset $2
       `,
-      [safeLimit, offset]
+      [safeLimit, offset, CROWN_BUYBACK_VAULT]
     )
 
     const total = Number(totalResult.rows[0]?.total ?? '0')
