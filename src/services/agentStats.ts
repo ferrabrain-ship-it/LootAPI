@@ -186,12 +186,29 @@ function parseNumericToWei(value: string | number | null | undefined) {
   return parseEther(normalized)
 }
 
+function normalizeUniqueWallets(wallets: string[]) {
+  const seen = new Set<string>()
+  const unique: Address[] = []
+
+  for (const wallet of wallets) {
+    const address = getAddress(wallet)
+    const key = address.toLowerCase()
+    if (seen.has(key)) continue
+
+    seen.add(key)
+    unique.push(address)
+  }
+
+  return unique
+}
+
 function getTrackedWallets() {
-  return env.agentStatsWallets
-    .split(',')
-    .map((wallet) => wallet.trim())
-    .filter(Boolean)
-    .map((wallet) => getAddress(wallet))
+  return normalizeUniqueWallets(
+    env.agentStatsWallets
+      .split(',')
+      .map((wallet) => wallet.trim())
+      .filter(Boolean)
+  )
 }
 
 async function mapWithConcurrency<T, R>(items: T[], concurrency: number, mapper: (item: T) => Promise<R>) {
@@ -628,17 +645,20 @@ async function refreshCurrentValueFields(client: PoolClient, walletAddress: Addr
 }
 
 async function replaceRecentRows(client: PoolClient, walletAddress: Address, rounds: EnrichedAgentRound[]) {
-  await client.query('delete from agent_recent_rounds where wallet_address = $1', [walletAddress.toLowerCase()])
+  const walletKey = walletAddress.toLowerCase()
+  const uniqueRounds = [...new Map(rounds.map((round) => [round.roundId, round])).values()]
 
-  if (rounds.length === 0) {
+  await client.query('delete from agent_recent_rounds where wallet_address = $1', [walletKey])
+
+  if (uniqueRounds.length === 0) {
     return
   }
 
   const values: unknown[] = []
-  const placeholders = rounds.map((round, index) => {
+  const placeholders = uniqueRounds.map((round, index) => {
     const offset = index * 14
     values.push(
-      walletAddress.toLowerCase(),
+      walletKey,
       round.roundId,
       round.blockNumber,
       round.blocksCovered,
@@ -676,6 +696,19 @@ async function replaceRecentRows(client: PoolClient, walletAddress: Address, rou
         round_timestamp
       )
       values ${placeholders.join(', ')}
+      on conflict (wallet_address, round_id) do update set
+        block_number = excluded.block_number,
+        blocks_covered = excluded.blocks_covered,
+        deployed_eth = excluded.deployed_eth,
+        rewards_eth = excluded.rewards_eth,
+        loot_earned = excluded.loot_earned,
+        loot_value_eth = excluded.loot_value_eth,
+        pnl_eth = excluded.pnl_eth,
+        true_pnl_eth = excluded.true_pnl_eth,
+        pnl_pct = excluded.pnl_pct,
+        outcome = excluded.outcome,
+        mode = excluded.mode,
+        round_timestamp = excluded.round_timestamp
     `,
     values
   )
@@ -944,7 +977,6 @@ function triggerAgentWalletSync(walletAddress: Address, logger: Logger = console
   const promise = syncAgentWalletStats(walletAddress, logger)
     .catch((error) => {
       logger.error(`[agent-stats] sync failed for ${walletAddress}`, error)
-      throw error
     })
     .finally(() => {
       inflight.delete(key)
@@ -1026,7 +1058,7 @@ export async function getAgentWalletStats(walletAddress: Address, recentLimit = 
 
 export async function runAgentStatsSyncOnce(options?: { wallets?: Address[]; logger?: Logger }) {
   const logger = options?.logger ?? console
-  const wallets = options?.wallets?.length ? options.wallets : getTrackedWallets()
+  const wallets = normalizeUniqueWallets(options?.wallets?.length ? options.wallets : getTrackedWallets())
 
   if (wallets.length === 0) {
     logger.warn('[agent-stats] no wallets configured in AGENT_STATS_WALLETS')
