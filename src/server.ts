@@ -45,6 +45,12 @@ import {
   getCrownStats,
   getCrownUser,
 } from './services/crown.js'
+import {
+  ChatError,
+  createChatMessage,
+  getChatMessages,
+  toggleChatReaction,
+} from './services/chat.js'
 import { runLootpotNotifierOnce } from './services/lootpotNotifier.js'
 import { createDiscordPriceWorker } from './services/discordPriceWorker.js'
 import { createDiscordMetricBotsWorker } from './services/discordMetricBotsWorker.js'
@@ -221,6 +227,43 @@ app.get('/api/profiles/batch', async (req) => {
     .map(asAddress)
   return getProfilesBatch(parsed)
 })
+
+async function chatMessagesGetHandler(req: FastifyRequest, reply: FastifyReply) {
+  const { limit = '50', viewer } = req.query as Record<string, string | undefined>
+  reply.header('Cache-Control', 'no-store, max-age=0')
+  return getChatMessages(limit, viewer)
+}
+
+async function chatMessagesPostHandler(req: FastifyRequest, reply: FastifyReply) {
+  reply.header('Cache-Control', 'no-store, max-age=0')
+  try {
+    return reply.status(201).send(await createChatMessage(req.body))
+  } catch (error) {
+    if (error instanceof ChatError) {
+      return reply.status(error.status).send({ error: error.message })
+    }
+    throw error
+  }
+}
+
+async function chatMessagesPatchHandler(req: FastifyRequest, reply: FastifyReply) {
+  reply.header('Cache-Control', 'no-store, max-age=0')
+  try {
+    return toggleChatReaction(req.body)
+  } catch (error) {
+    if (error instanceof ChatError) {
+      return reply.status(error.status).send({ error: error.message })
+    }
+    throw error
+  }
+}
+
+app.get('/api/chat/messages', chatMessagesGetHandler)
+app.post('/api/chat/messages', chatMessagesPostHandler)
+app.patch('/api/chat/messages', chatMessagesPatchHandler)
+app.get('/chat/messages', chatMessagesGetHandler)
+app.post('/chat/messages', chatMessagesPostHandler)
+app.patch('/chat/messages', chatMessagesPatchHandler)
 
 app.get('/api/leaderboard/miners', async (req) => {
   const { limit = '12' } = req.query as { limit?: string }
