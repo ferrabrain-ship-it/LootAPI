@@ -67,7 +67,7 @@ export const env = {
   scanStartBlock: toBigInt(process.env.LOYALTY_SCAN_START_BLOCK || process.env.DEPLOY_SCAN_START_BLOCK, 0n),
   crownScanStartBlock: toBigInt(process.env.CROWN_SCAN_START_BLOCK, 45143591n),
   goldCasesScanStartBlock: toBigInt(process.env.GOLD_CASES_SCAN_START_BLOCK, 45309291n),
-  supabaseUrl: process.env.SUPABASE_URL || '',
-  supabaseServiceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY || '',
+  supabaseUrl: process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || '',
+  supabaseServiceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SERVICE_KEY || '',
   allowChatMemoryFallback: process.env.ALLOW_CHAT_MEMORY_FALLBACK === 'true',
 }

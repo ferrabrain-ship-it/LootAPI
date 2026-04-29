@@ -52,9 +52,16 @@ type ChatSession = {
 type ChatMemory = typeof globalThis & {
   __minelootChatMessages?: ChatMessage[]
   __minelootChatRateLimit?: Map<string, number>
+  __minelootChatStorageIssue?: ChatStorageIssue | null
 }
 
 const memory = globalThis as ChatMemory
+
+type ChatStorageIssue = {
+  operation: string
+  detail: string
+  at: string
+}
 
 export class ChatError extends Error {
   constructor(message: string, public readonly status: number) {
@@ -106,8 +113,17 @@ export function createChatSessionMessage(address: string, issuedAt: number) {
 function handleChatStorageFailure(operation: string, error?: unknown) {
   const detail = error instanceof Error ? error.message : error ? String(error) : 'not configured'
 
+  memory.__minelootChatStorageIssue = {
+    operation,
+    detail,
+    at: new Date().toISOString(),
+  }
   console.warn(`[chat] ${operation}; falling back to in-memory messages:`, detail)
   return null
+}
+
+function clearChatStorageIssue() {
+  memory.__minelootChatStorageIssue = null
 }
 
 function normalizeReactionMap(value: unknown): StoredReactionMap {
@@ -195,6 +211,7 @@ async function readSupabaseMessages(limit: number, viewerAddress?: string | null
     return handleChatStorageFailure('read failed', error)
   }
 
+  clearChatStorageIssue()
   const mapped = (data ?? [])
     .map((row) => mapRow(row as StoredChatRow, viewerAddress))
     .filter((message): message is ChatMessage => Boolean(message))
@@ -216,6 +233,7 @@ async function insertSupabaseMessage(address: string, text: string, replyToId: s
     return handleChatStorageFailure('insert failed', error)
   }
 
+  clearChatStorageIssue()
   return mapRow(data as StoredChatRow, viewerAddress)
 }
 
@@ -313,6 +331,7 @@ async function toggleSupabaseReaction(messageId: string, address: string, emoji:
     .single()
 
   if (error) return handleChatStorageFailure('reaction update failed', error)
+  clearChatStorageIssue()
   return mapRow(data as StoredChatRow, address)
 }
 
@@ -409,4 +428,13 @@ export async function toggleChatReaction(body: unknown) {
 export function __resetChatMemoryForTests() {
   memory.__minelootChatMessages = []
   memory.__minelootChatRateLimit = new Map()
+  memory.__minelootChatStorageIssue = null
+}
+
+export function getChatStorageHealth() {
+  return {
+    configured: Boolean(supabase),
+    storage: supabase ? 'supabase' : 'memory',
+    lastIssue: memory.__minelootChatStorageIssue ?? null,
+  }
 }
