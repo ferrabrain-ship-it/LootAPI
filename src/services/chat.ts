@@ -1,7 +1,6 @@
 import type { Address } from 'viem'
 import { verifyMessage } from 'viem'
 import { supabaseAdmin as supabase } from '../lib/supabase.js'
-import { env } from '../config/env.js'
 
 const MAX_MESSAGE_LENGTH = 280
 const MAX_LIMIT = 80
@@ -107,13 +106,8 @@ export function createChatSessionMessage(address: string, issuedAt: number) {
 function handleChatStorageFailure(operation: string, error?: unknown) {
   const detail = error instanceof Error ? error.message : error ? String(error) : 'not configured'
 
-  if (env.allowChatMemoryFallback) {
-    console.warn(`[chat] ${operation}; falling back to in-memory messages:`, detail)
-    return null
-  }
-
-  console.error(`[chat] ${operation}; persistent chat storage unavailable:`, detail)
-  throw new ChatError('Chat storage unavailable', 503)
+  console.warn(`[chat] ${operation}; falling back to in-memory messages:`, detail)
+  return null
 }
 
 function normalizeReactionMap(value: unknown): StoredReactionMap {
