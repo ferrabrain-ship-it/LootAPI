@@ -52,16 +52,9 @@ type ChatSession = {
 type ChatMemory = typeof globalThis & {
   __minelootChatMessages?: ChatMessage[]
   __minelootChatRateLimit?: Map<string, number>
-  __minelootChatStorageIssue?: ChatStorageIssue | null
 }
 
 const memory = globalThis as ChatMemory
-
-type ChatStorageIssue = {
-  operation: string
-  detail: string
-  at: string
-}
 
 export class ChatError extends Error {
   constructor(message: string, public readonly status: number) {
@@ -106,24 +99,8 @@ function normalizeEmoji(emoji: unknown) {
   return trimmed
 }
 
-export function createChatSessionMessage(address: string, issuedAt: number) {
+function sessionMessage(address: string, issuedAt: number) {
   return `MineLoot Chat Session\nAddress: ${address}\nIssued At: ${issuedAt}`
-}
-
-function handleChatStorageFailure(operation: string, error?: unknown) {
-  const detail = error instanceof Error ? error.message : error ? String(error) : 'not configured'
-
-  memory.__minelootChatStorageIssue = {
-    operation,
-    detail,
-    at: new Date().toISOString(),
-  }
-  console.warn(`[chat] ${operation}; falling back to in-memory messages:`, detail)
-  return null
-}
-
-function clearChatStorageIssue() {
-  memory.__minelootChatStorageIssue = null
 }
 
 function normalizeReactionMap(value: unknown): StoredReactionMap {
@@ -199,7 +176,7 @@ function attachReplies(messages: ChatMessage[]) {
 }
 
 async function readSupabaseMessages(limit: number, viewerAddress?: string | null) {
-  if (!supabase) return handleChatStorageFailure('read failed')
+  if (!supabase) return null
 
   const { data, error } = await supabase
     .from('chat_messages')
@@ -208,10 +185,10 @@ async function readSupabaseMessages(limit: number, viewerAddress?: string | null
     .limit(limit)
 
   if (error) {
-    return handleChatStorageFailure('read failed', error)
+    console.warn('[chat] falling back to in-memory messages:', error.message)
+    return null
   }
 
-  clearChatStorageIssue()
   const mapped = (data ?? [])
     .map((row) => mapRow(row as StoredChatRow, viewerAddress))
     .filter((message): message is ChatMessage => Boolean(message))
@@ -221,7 +198,7 @@ async function readSupabaseMessages(limit: number, viewerAddress?: string | null
 }
 
 async function insertSupabaseMessage(address: string, text: string, replyToId: string | null, viewerAddress?: string | null) {
-  if (!supabase) return handleChatStorageFailure('insert failed')
+  if (!supabase) return null
 
   const { data, error } = await supabase
     .from('chat_messages')
@@ -230,10 +207,10 @@ async function insertSupabaseMessage(address: string, text: string, replyToId: s
     .single()
 
   if (error) {
-    return handleChatStorageFailure('insert failed', error)
+    console.warn('[chat] falling back to in-memory insert:', error.message)
+    return null
   }
 
-  clearChatStorageIssue()
   return mapRow(data as StoredChatRow, viewerAddress)
 }
 
@@ -288,7 +265,7 @@ async function verifyChatSession(address: string, session: unknown) {
   try {
     const valid = await verifyMessage({
       address: address as Address,
-      message: createChatSessionMessage(address, issuedAt),
+      message: sessionMessage(address, issuedAt),
       signature: signature as `0x${string}`,
     })
     if (!valid) throw new ChatError('Invalid chat signature', 401)
@@ -299,7 +276,7 @@ async function verifyChatSession(address: string, session: unknown) {
 }
 
 async function toggleSupabaseReaction(messageId: string, address: string, emoji: string) {
-  if (!supabase) return handleChatStorageFailure('reaction update failed')
+  if (!supabase) return null
 
   const { data: existing, error: readError } = await supabase
     .from('chat_messages')
@@ -307,7 +284,7 @@ async function toggleSupabaseReaction(messageId: string, address: string, emoji:
     .eq('id', messageId)
     .single()
 
-  if (readError || !existing) return handleChatStorageFailure('reaction read failed', readError)
+  if (readError || !existing) return null
 
   const reactions = normalizeReactionMap((existing as StoredChatRow).reactions)
   const users = new Set(reactions[emoji] ?? [])
@@ -330,8 +307,7 @@ async function toggleSupabaseReaction(messageId: string, address: string, emoji:
     .select('id,wallet_address,text,created_at,reply_to_id,reactions')
     .single()
 
-  if (error) return handleChatStorageFailure('reaction update failed', error)
-  clearChatStorageIssue()
+  if (error) return null
   return mapRow(data as StoredChatRow, address)
 }
 
@@ -423,18 +399,4 @@ export async function toggleChatReaction(body: unknown) {
   if (!message) throw new ChatError('Message not found', 404)
 
   return { message }
-}
-
-export function __resetChatMemoryForTests() {
-  memory.__minelootChatMessages = []
-  memory.__minelootChatRateLimit = new Map()
-  memory.__minelootChatStorageIssue = null
-}
-
-export function getChatStorageHealth() {
-  return {
-    configured: Boolean(supabase),
-    storage: supabase ? 'supabase' : 'memory',
-    lastIssue: memory.__minelootChatStorageIssue ?? null,
-  }
 }

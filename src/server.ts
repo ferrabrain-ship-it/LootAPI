@@ -54,7 +54,6 @@ import {
   ChatError,
   createChatMessage,
   getChatMessages,
-  getChatStorageHealth,
   toggleChatReaction,
 } from './services/chat.js'
 import { runLootpotNotifierOnce } from './services/lootpotNotifier.js'
@@ -299,17 +298,9 @@ async function chatMessagesPatchHandler(req: FastifyRequest, reply: FastifyReply
 app.get('/api/chat/messages', chatMessagesGetHandler)
 app.post('/api/chat/messages', chatMessagesPostHandler)
 app.patch('/api/chat/messages', chatMessagesPatchHandler)
-app.get('/api/chat/health', async (_req, reply) => {
-  reply.header('Cache-Control', 'no-store, max-age=0')
-  return getChatStorageHealth()
-})
 app.get('/chat/messages', chatMessagesGetHandler)
 app.post('/chat/messages', chatMessagesPostHandler)
 app.patch('/chat/messages', chatMessagesPatchHandler)
-app.get('/chat/health', async (_req, reply) => {
-  reply.header('Cache-Control', 'no-store, max-age=0')
-  return getChatStorageHealth()
-})
 
 app.get('/api/leaderboard/miners', async (req) => {
   const { limit = '12' } = req.query as { limit?: string }
