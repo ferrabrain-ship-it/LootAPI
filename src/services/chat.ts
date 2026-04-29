@@ -283,19 +283,37 @@ async function verifyChatSession(address: string, session: unknown) {
 async function toggleSupabaseReaction(messageId: string, address: string, emoji: string) {
   if (!supabase) return handleChatStorageFailure('reaction update failed')
 
-  const { data, error } = await supabase.rpc('toggle_chat_reaction', {
-    p_message_id: messageId,
-    p_wallet_address: address,
-    p_emoji: emoji,
-  })
+  const { data: existing, error: readError } = await supabase
+    .from('chat_messages')
+    .select('id,reactions')
+    .eq('id', messageId)
+    .single()
 
-  if (error) {
-    return handleChatStorageFailure('reaction update failed', error)
+  if (readError || !existing) return handleChatStorageFailure('reaction read failed', readError)
+
+  const reactions = normalizeReactionMap((existing as StoredChatRow).reactions)
+  const users = new Set(reactions[emoji] ?? [])
+  if (users.has(address)) {
+    users.delete(address)
+  } else {
+    users.add(address)
   }
 
-  const row = Array.isArray(data) ? data[0] : data
-  if (!row) return null
-  return mapRow(row as StoredChatRow, address)
+  if (users.size === 0) {
+    delete reactions[emoji]
+  } else {
+    reactions[emoji] = Array.from(users)
+  }
+
+  const { data, error } = await supabase
+    .from('chat_messages')
+    .update({ reactions })
+    .eq('id', messageId)
+    .select('id,wallet_address,text,created_at,reply_to_id,reactions')
+    .single()
+
+  if (error) return handleChatStorageFailure('reaction update failed', error)
+  return mapRow(data as StoredChatRow, address)
 }
 
 function toggleMemoryReaction(messageId: string, address: string, emoji: string) {
