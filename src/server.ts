@@ -78,7 +78,14 @@ const discordPriceWorker = createDiscordPriceWorker({ logger: console })
 const discordMetricBotsWorker = createDiscordMetricBotsWorker({ logger: console })
 const discordPriceCommandBot = createDiscordPriceCommandBot({ logger: console })
 const allowedCorsOrigins = new Set(
-  [env.corsOrigin, env.appUrl]
+  [
+    env.corsOrigin,
+    env.appUrl,
+    'http://localhost:3000',
+    'http://127.0.0.1:3000',
+    'https://mineloot.app',
+    'https://www.mineloot.app',
+  ]
     .flatMap((value) => value.split(','))
     .map((value) => value.trim().replace(/\/$/, ''))
     .filter(Boolean),
