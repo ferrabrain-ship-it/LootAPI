@@ -66,6 +66,8 @@ export const env = {
   rpcFallback3: process.env.RPC_URL_FALLBACK_3 || 'https://lb.drpc.live/base/ApemCwwcnEdhvRuDv6G7yCm1-vp6IsgR8aZHdg7bSgwO',
   scanStartBlock: toBigInt(process.env.LOYALTY_SCAN_START_BLOCK || process.env.DEPLOY_SCAN_START_BLOCK, 0n),
   crownScanStartBlock: toBigInt(process.env.CROWN_SCAN_START_BLOCK, 45143591n),
+  goldCasesScanStartBlock: toBigInt(process.env.GOLD_CASES_SCAN_START_BLOCK, 45309291n),
   supabaseUrl: process.env.SUPABASE_URL || '',
   supabaseServiceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY || '',
+  allowChatMemoryFallback: process.env.ALLOW_CHAT_MEMORY_FALLBACK === 'true',
 }

@@ -46,6 +46,11 @@ import {
   getCrownUser,
 } from './services/crown.js'
 import {
+  getGoldCaseActivity,
+  getGoldCaseBestWins,
+  getGoldCaseStats,
+} from './services/goldCases.js'
+import {
   ChatError,
   createChatMessage,
   getChatMessages,
@@ -72,9 +77,22 @@ let roundEventPrevious: RoundEventSnapshot | null = null
 const discordPriceWorker = createDiscordPriceWorker({ logger: console })
 const discordMetricBotsWorker = createDiscordMetricBotsWorker({ logger: console })
 const discordPriceCommandBot = createDiscordPriceCommandBot({ logger: console })
+const allowedCorsOrigins = new Set(
+  [env.corsOrigin, env.appUrl]
+    .flatMap((value) => value.split(','))
+    .map((value) => value.trim().replace(/\/$/, ''))
+    .filter(Boolean),
+)
+
+function isAllowedCorsOrigin(origin?: string) {
+  if (!origin) return true
+  return allowedCorsOrigins.has(origin.replace(/\/$/, ''))
+}
 
 await app.register(cors, {
-  origin: true,
+  origin: (origin: string | undefined, callback: (error: Error | null, allow: boolean) => void) => {
+    callback(null, isAllowedCorsOrigin(origin))
+  },
 })
 
 app.get('/health', async () => ({ ok: true }))
@@ -160,6 +178,18 @@ app.get('/api/crown/skill/context', async (req) => {
   const { user } = req.query as { user?: string }
   return getCrownSkillContext(user ? asAddress(user) : undefined)
 })
+
+app.get('/api/gold-cases/activity', async (req) => {
+  const { limit = '20' } = req.query as Record<string, string | undefined>
+  return getGoldCaseActivity(Number(limit))
+})
+
+app.get('/api/gold-cases/best-wins', async (req) => {
+  const { limit = '10' } = req.query as Record<string, string | undefined>
+  return getGoldCaseBestWins(Number(limit))
+})
+
+app.get('/api/gold-cases/stats', async () => getGoldCaseStats())
 
 app.get('/api/round/current', async (req) => {
   const { user } = req.query as { user?: string }

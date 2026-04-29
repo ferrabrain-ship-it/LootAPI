@@ -74,6 +74,12 @@ const AUTOCROWN_BATCH_EXECUTED_FOR_EVENT = parseAbiItem(
   'event BatchExecutedFor(address indexed user, uint64 indexed roundId, uint256 amount, uint256 totalPrice, uint256 executorFee, bool battlePhase, uint256 depositBalance)'
 )
 const AUTOCROWN_STOPPED_EVENT = parseAbiItem('event Stopped(address indexed user, uint256 refunded)')
+const GOLD_CASES_OPENED_EVENT = parseAbiItem(
+  'event ChestsOpened(uint256 indexed requestId, address indexed player, uint8 chestCount, uint256 chestPrice, uint256 totalCost, bool paidFromClaimable)'
+)
+const GOLD_CASES_RESOLVED_EVENT = parseAbiItem(
+  'event ChestsResolved(uint256 indexed requestId, address indexed player, uint8 chestCount, uint256 totalPayout, uint256 jackpotPayout, uint8[] tiers, uint256[] payouts)'
+)
 
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000'
 const LOG_BLOCK_RANGE = 10_000n
@@ -113,6 +119,20 @@ type CrownRoundStorage = [
   boolean,
   boolean,
 ]
+
+const goldCaseTiers = [
+  { name: 'Empty', multiplierLabel: '0x', multiplierBps: null },
+  { name: 'Common', multiplierLabel: '0.25x', multiplierBps: 2_500n },
+  { name: 'Rare', multiplierLabel: '1x', multiplierBps: 10_000n },
+  { name: 'Epic', multiplierLabel: '3x', multiplierBps: 30_000n },
+  { name: 'Legendary', multiplierLabel: '10x', multiplierBps: 100_000n },
+  { name: 'Mythic', multiplierLabel: '50x', multiplierBps: 500_000n },
+  { name: 'Jackpot', multiplierLabel: '80% pool', multiplierBps: null },
+] as const
+
+function getGoldCaseTier(index: number) {
+  return goldCaseTiers[Math.max(0, Math.min(index, goldCaseTiers.length - 1))]
+}
 
 function normalizeAddress(address: string | undefined, label = 'address') {
   if (!address) {
@@ -1258,6 +1278,166 @@ async function syncAutoCrownStops(client: PoolClient, latestBlock: bigint) {
   return { streamName, inserted: logs.length, latestBlock }
 }
 
+async function syncGoldCaseOpens(client: PoolClient, latestBlock: bigint) {
+  const streamName = 'gold_case_opens'
+  const lastSyncedBlock = await getLastSyncedBlock(client, streamName, env.goldCasesScanStartBlock)
+  const fromBlock = lastSyncedBlock + 1n
+  if (fromBlock > latestBlock) return { streamName, inserted: 0, latestBlock }
+
+  const logs = await getLogsPaged({
+    address: CONTRACTS.goldCases,
+    event: GOLD_CASES_OPENED_EVENT,
+    fromBlock,
+    toBlock: latestBlock,
+  })
+
+  await upsertRows(logs, ROW_UPSERT_CONCURRENCY, async (log) => {
+    const timestampMs = await getBlockTimestampMs(log.blockNumber)
+    await runWriteQuery(
+      `
+        insert into gold_case_opens (
+          tx_hash, log_index, request_id, player_address, chest_count,
+          chest_price, total_cost, paid_from_claimable, block_number, block_timestamp
+        )
+        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,to_timestamp($10 / 1000.0))
+        on conflict (tx_hash, log_index) do update
+        set request_id = excluded.request_id,
+            player_address = excluded.player_address,
+            chest_count = excluded.chest_count,
+            chest_price = excluded.chest_price,
+            total_cost = excluded.total_cost,
+            paid_from_claimable = excluded.paid_from_claimable,
+            block_number = excluded.block_number,
+            block_timestamp = excluded.block_timestamp
+      `,
+      [
+        log.transactionHash,
+        log.logIndex,
+        toBigInt(log.args.requestId).toString(),
+        normalizeAddress(log.args.player, 'gold cases player'),
+        Number(toBigInt(log.args.chestCount)),
+        toBigInt(log.args.chestPrice).toString(),
+        toBigInt(log.args.totalCost).toString(),
+        Boolean(log.args.paidFromClaimable),
+        log.blockNumber.toString(),
+        timestampMs,
+      ]
+    )
+  })
+
+  await updateSyncState(client, streamName, latestBlock)
+  return { streamName, inserted: logs.length, latestBlock }
+}
+
+async function syncGoldCaseResolutions(client: PoolClient, latestBlock: bigint) {
+  const streamName = 'gold_case_resolutions'
+  const lastSyncedBlock = await getLastSyncedBlock(client, streamName, env.goldCasesScanStartBlock)
+  const fromBlock = lastSyncedBlock + 1n
+  if (fromBlock > latestBlock) return { streamName, inserted: 0, latestBlock }
+
+  const logs = await getLogsPaged({
+    address: CONTRACTS.goldCases,
+    event: GOLD_CASES_RESOLVED_EVENT,
+    fromBlock,
+    toBlock: latestBlock,
+  })
+
+  await upsertRows(logs, ROW_UPSERT_CONCURRENCY, async (log) => {
+    const timestampMs = await getBlockTimestampMs(log.blockNumber)
+    const requestId = toBigInt(log.args.requestId)
+    const player = normalizeAddress(log.args.player, 'gold cases player')
+    const chestCount = Number(toBigInt(log.args.chestCount))
+    const totalPayout = toBigInt(log.args.totalPayout)
+    const jackpotPayout = toBigInt(log.args.jackpotPayout)
+    const tiers = Array.from(log.args.tiers ?? []).map((tier) => Number(tier))
+    const payouts = Array.from(log.args.payouts ?? []).map((payout) => toBigInt(payout))
+
+    await runWriteQuery(
+      `
+        insert into gold_case_resolutions (
+          tx_hash, log_index, request_id, player_address, chest_count,
+          total_payout, jackpot_payout, tiers_json, payouts_json,
+          block_number, block_timestamp
+        )
+        values ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10,to_timestamp($11 / 1000.0))
+        on conflict (tx_hash, log_index) do update
+        set request_id = excluded.request_id,
+            player_address = excluded.player_address,
+            chest_count = excluded.chest_count,
+            total_payout = excluded.total_payout,
+            jackpot_payout = excluded.jackpot_payout,
+            tiers_json = excluded.tiers_json,
+            payouts_json = excluded.payouts_json,
+            block_number = excluded.block_number,
+            block_timestamp = excluded.block_timestamp
+      `,
+      [
+        log.transactionHash,
+        log.logIndex,
+        requestId.toString(),
+        player,
+        chestCount,
+        totalPayout.toString(),
+        jackpotPayout.toString(),
+        JSON.stringify(tiers),
+        JSON.stringify(payouts.map((payout) => payout.toString())),
+        log.blockNumber.toString(),
+        timestampMs,
+      ]
+    )
+
+    await mapWithConcurrency(tiers, ROW_UPSERT_CONCURRENCY, async (tier, chestIndex) => {
+      const payout = payouts[chestIndex] ?? 0n
+      const tierInfo = getGoldCaseTier(tier)
+      await runWriteQuery(
+        `
+          insert into gold_case_results (
+            request_id, chest_index, tx_hash, log_index, player_address, tier,
+            tier_name, multiplier_label, multiplier_bps, payout, total_payout,
+            jackpot_payout, chest_count, block_number, block_timestamp
+          )
+          values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,to_timestamp($15 / 1000.0))
+          on conflict (request_id, chest_index) do update
+          set tx_hash = excluded.tx_hash,
+              log_index = excluded.log_index,
+              player_address = excluded.player_address,
+              tier = excluded.tier,
+              tier_name = excluded.tier_name,
+              multiplier_label = excluded.multiplier_label,
+              multiplier_bps = excluded.multiplier_bps,
+              payout = excluded.payout,
+              total_payout = excluded.total_payout,
+              jackpot_payout = excluded.jackpot_payout,
+              chest_count = excluded.chest_count,
+              block_number = excluded.block_number,
+              block_timestamp = excluded.block_timestamp
+        `,
+        [
+          requestId.toString(),
+          chestIndex,
+          log.transactionHash,
+          log.logIndex,
+          player,
+          tier,
+          tierInfo.name,
+          tierInfo.multiplierLabel,
+          tierInfo.multiplierBps?.toString() ?? null,
+          payout.toString(),
+          totalPayout.toString(),
+          jackpotPayout.toString(),
+          chestCount,
+          log.blockNumber.toString(),
+          timestampMs,
+        ]
+      )
+      return null
+    })
+  })
+
+  await updateSyncState(client, streamName, latestBlock)
+  return { streamName, inserted: logs.length, latestBlock }
+}
+
 async function syncVaultEvents(client: PoolClient, latestBlock: bigint) {
   const streamName = 'treasury_vault'
   const lastSyncedBlock = await getLastSyncedBlock(client, streamName)
@@ -1877,6 +2057,8 @@ export async function runProtocolIndexSyncOnce(options?: {
     await runStream('autocrown_executed_for', () => syncAutoCrownExecutedFor(client, 'ExecutedFor', latestBlock))
     await runStream('autocrown_batch_executed_for', () => syncAutoCrownExecutedFor(client, 'BatchExecutedFor', latestBlock))
     await runStream('autocrown_stops', () => syncAutoCrownStops(client, latestBlock))
+    await runStream('gold_case_opens', () => syncGoldCaseOpens(client, latestBlock))
+    await runStream('gold_case_resolutions', () => syncGoldCaseResolutions(client, latestBlock))
     await runStream('treasury_vault', () => syncVaultEvents(client, latestBlock))
     await runStream('treasury_buybacks', () => syncBuybacks(client, latestBlock))
     await runStream('direct_burns', () => syncDirectBurns(client, latestBlock))

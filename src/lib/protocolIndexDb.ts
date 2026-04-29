@@ -352,6 +352,56 @@ create table if not exists autocrown_stops (
   primary key (tx_hash, log_index)
 );
 
+create table if not exists gold_case_opens (
+  tx_hash text not null,
+  log_index integer not null,
+  request_id numeric(78,0) not null,
+  player_address text not null,
+  chest_count integer not null,
+  chest_price numeric(78,0) not null,
+  total_cost numeric(78,0) not null,
+  paid_from_claimable boolean not null,
+  block_number bigint not null,
+  block_timestamp timestamptz,
+  primary key (tx_hash, log_index),
+  unique (request_id)
+);
+
+create table if not exists gold_case_resolutions (
+  tx_hash text not null,
+  log_index integer not null,
+  request_id numeric(78,0) not null,
+  player_address text not null,
+  chest_count integer not null,
+  total_payout numeric(78,0) not null,
+  jackpot_payout numeric(78,0) not null,
+  tiers_json jsonb not null default '[]'::jsonb,
+  payouts_json jsonb not null default '[]'::jsonb,
+  block_number bigint not null,
+  block_timestamp timestamptz,
+  primary key (tx_hash, log_index),
+  unique (request_id)
+);
+
+create table if not exists gold_case_results (
+  request_id numeric(78,0) not null,
+  chest_index integer not null,
+  tx_hash text not null,
+  log_index integer not null,
+  player_address text not null,
+  tier integer not null,
+  tier_name text not null,
+  multiplier_label text not null,
+  multiplier_bps numeric(78,0),
+  payout numeric(78,0) not null,
+  total_payout numeric(78,0) not null,
+  jackpot_payout numeric(78,0) not null,
+  chest_count integer not null,
+  block_number bigint not null,
+  block_timestamp timestamptz,
+  primary key (request_id, chest_index)
+);
+
 create index if not exists idx_protocol_rounds_settled_block
   on protocol_rounds (settled_block_number desc);
 
@@ -424,6 +474,21 @@ create index if not exists idx_autocrown_configs_active
 
 create index if not exists idx_autocrown_executions_user
   on autocrown_executions (user_address, round_id desc, block_number desc, log_index desc);
+
+create index if not exists idx_gold_case_opens_block
+  on gold_case_opens (block_number desc, log_index desc);
+
+create index if not exists idx_gold_case_opens_player
+  on gold_case_opens (player_address, block_number desc, log_index desc);
+
+create index if not exists idx_gold_case_resolutions_block
+  on gold_case_resolutions (block_number desc, log_index desc);
+
+create index if not exists idx_gold_case_results_best
+  on gold_case_results (tier desc, payout desc, block_number desc, log_index desc);
+
+create index if not exists idx_gold_case_results_player
+  on gold_case_results (player_address, block_number desc, log_index desc);
 `
 
 let protocolIndexPool: Pool | null = null
