@@ -85,6 +85,8 @@ const allowedCorsOrigins = new Set(
     'http://127.0.0.1:3000',
     'https://mineloot.app',
     'https://www.mineloot.app',
+    'https://lootgames.app',
+    'https://www.lootgames.app',
   ]
     .flatMap((value) => value.split(','))
     .map((value) => value.trim().replace(/\/$/, ''))
@@ -428,6 +430,7 @@ app.get('/api/events/rounds', async (_req, reply) => {
   const initialSnapshot = roundEventPrevious ?? await getCurrentRound().catch(() => null)
   if (initialSnapshot) {
     sendSse(reply, 'roundTransition', await getLatestRoundTransition().catch(() => ({ settled: null, newRound: initialSnapshot })))
+    if (!roundEventPrevious) roundEventPrevious = initialSnapshot
   }
 
   ensureRoundEventLoop()

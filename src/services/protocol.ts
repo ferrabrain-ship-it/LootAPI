@@ -2077,7 +2077,7 @@ export async function getUserSummary(address: Address) {
 
 export async function getAutoMine(address: Address) {
   return withCache(`automine:${address}`, 10_000, async () => {
-    const [state, progress] = await Promise.all([
+    const [state, progress, autoLoopEnabled] = await Promise.all([
       publicClient.readContract({
         address: CONTRACTS.autoMiner,
         abi: autoMinerAbi,
@@ -2108,6 +2108,12 @@ export async function getAutoMine(address: Address) {
         functionName: 'getConfigProgress',
         args: [address],
       }) as Promise<[boolean, bigint, bigint, bigint, bigint]>,
+      publicClient.readContract({
+        address: CONTRACTS.autoMiner,
+        abi: autoMinerAbi,
+        functionName: 'autoLoopEnabled',
+        args: [address],
+      }) as Promise<boolean>,
     ])
 
     const [config, lastRound, costPerRound, roundsRemaining, totalRefundable] = state
@@ -2126,7 +2132,9 @@ export async function getAutoMine(address: Address) {
         depositAmountFormatted: etherString(config.depositAmount),
         selectedBlockMask,
         selectedBlocks,
+        autoLoopEnabled,
       },
+      autoLoopEnabled,
       lastRound: Number(lastRound),
       costPerRound: costPerRound.toString(),
       costPerRoundFormatted: etherString(costPerRound),
