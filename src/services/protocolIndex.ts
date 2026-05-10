@@ -565,32 +565,6 @@ export async function getIndexedTreasuryStats() {
     }
   }, {
     maxLagBlocks: INDEX_TREASURY_MAX_LAG_BLOCKS,
-  }).then(async (indexed) => {
-    if (!indexed) return null
-
-    const pool = getProtocolIndexPool()
-    const lagResult = await pool.query<{ latest_block: string }>(
-      `
-      with latest as (
-        select coalesce(max(block_number), 0) as latest_block from protocol_treasury_vault_events where contract_address = any($1::text[])
-        union all
-        select coalesce(max(block_number), 0) as latest_block from protocol_treasury_buybacks where contract_address = any($1::text[])
-        union all
-        select coalesce(max(block_number), 0) as latest_block from protocol_direct_burns where contract_address = any($2::text[])
-      )
-      select coalesce(max(latest_block), 0)::text as latest_block from latest
-    `,
-      [TREASURY_HISTORY_CONTRACTS, LOOT_HISTORY_CONTRACTS]
-    )
-
-    const latestIndexedBlock = toBigInt(lagResult.rows[0]?.latest_block ?? '0')
-    const latestHead = await getLatestHeadBlock()
-    const lag = latestHead > latestIndexedBlock ? latestHead - latestIndexedBlock : 0n
-    if (lag > INDEX_TREASURY_MAX_LAG_BLOCKS) {
-      return null
-    }
-
-    return indexed
   })
 }
 
