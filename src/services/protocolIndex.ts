@@ -484,7 +484,7 @@ async function getDeploymentsForRounds(client: PoolClient, roundIds: bigint[]) {
 }
 
 export async function getIndexedTreasuryStats() {
-  return withProtocolIndex(['treasury_vault', 'treasury_buybacks', 'direct_burns'], async (client) => {
+  return withProtocolIndex(['rounds', 'treasury_vault', 'treasury_buybacks', 'direct_burns'], async (client) => {
     const result = await client.query<{
       total_vaulted: string
       current_vaulted: string
@@ -494,22 +494,61 @@ export async function getIndexedTreasuryStats() {
       total_buybacks: string
     }>(
       `
-      with vault as (
+      with vault_events as (
         select
-          coalesce(sum(amount), 0) as total_vaulted
+          contract_address,
+          coalesce(sum(amount), 0) as event_vaulted
         from protocol_treasury_vault_events
         where contract_address = any($1::text[])
+        group by contract_address
       ),
-      current_vault as (
-        select coalesce(sum(total_vaulted), 0) as current_vaulted
-        from (
-          select distinct on (contract_address)
-            contract_address,
-            total_vaulted
-          from protocol_treasury_vault_events
-          where contract_address = any($1::text[])
-          order by contract_address, block_number desc, log_index desc
-        ) latest
+      vault_latest as (
+        select distinct on (contract_address)
+          contract_address,
+          total_vaulted
+        from protocol_treasury_vault_events
+        where contract_address = any($1::text[])
+        order by contract_address, block_number desc, log_index desc
+      ),
+      vault_rounds as (
+        select
+          contract_address,
+          coalesce(sum(
+            case
+              when winners_deployed = 0 and total_deployed > 0 and total_winnings = 0 then
+                total_deployed - floor((total_deployed * $4::numeric) / $6::numeric)
+              else
+                floor((
+                  (total_deployed - winners_deployed)
+                  - floor(((total_deployed - winners_deployed) * $4::numeric) / $6::numeric)
+                ) * $5::numeric / $6::numeric)
+            end
+          ), 0) as computed_vaulted
+        from protocol_rounds
+        where contract_address = any($7::text[])
+          and settled = true
+        group by contract_address
+      ),
+      vault_by_contract as (
+        select
+          coalesce(vault_events.contract_address, vault_rounds.contract_address) as contract_address,
+          greatest(
+            coalesce(vault_events.event_vaulted, 0),
+            coalesce(vault_rounds.computed_vaulted, 0)
+          ) as total_vaulted,
+          greatest(
+            coalesce(vault_latest.total_vaulted, 0),
+            coalesce(vault_rounds.computed_vaulted, 0)
+          ) as current_vaulted
+        from vault_events
+        full join vault_rounds on vault_rounds.contract_address = vault_events.contract_address
+        left join vault_latest on vault_latest.contract_address = coalesce(vault_events.contract_address, vault_rounds.contract_address)
+      ),
+      vault as (
+        select
+          coalesce(sum(total_vaulted), 0) as total_vaulted,
+          coalesce(sum(current_vaulted), 0) as current_vaulted
+        from vault_by_contract
       ),
       buybacks as (
         select
@@ -531,14 +570,22 @@ export async function getIndexedTreasuryStats() {
       )
       select
         vault.total_vaulted::text,
-        current_vault.current_vaulted::text,
+        vault.current_vaulted::text,
         buybacks.buyback_burned::text,
         burns.direct_burned::text,
         buybacks.total_distributed_to_stakers::text,
         buybacks.total_buybacks
-      from vault, current_vault, buybacks, burns
+      from vault, buybacks, burns
     `,
-      [TREASURY_HISTORY_CONTRACTS, TREASURY_HISTORY_CONTRACTS, LOOT_HISTORY_CONTRACTS]
+      [
+        TREASURY_HISTORY_CONTRACTS,
+        TREASURY_HISTORY_CONTRACTS,
+        LOOT_HISTORY_CONTRACTS,
+        PROTOCOL_CONSTANTS.adminFeeBps.toString(),
+        PROTOCOL_CONSTANTS.vaultFeeBps.toString(),
+        PROTOCOL_CONSTANTS.bpsDenominator.toString(),
+        GRID_HISTORY_CONTRACTS,
+      ]
     )
 
     const row = result.rows[0]
