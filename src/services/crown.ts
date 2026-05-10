@@ -1,13 +1,14 @@
 import { formatEther, getAddress, type Address } from 'viem'
 import crownAbi from '../abis/Crown.json' with { type: 'json' }
 import autoCrownAbi from '../abis/AutoCrown.json' with { type: 'json' }
-import { CONTRACTS } from '../config/contracts.js'
+import { CONTRACTS, LEGACY_CONTRACTS } from '../config/contracts.js'
 import { hasProtocolIndexDatabase, getProtocolIndexPool } from '../lib/protocolIndexDb.js'
 import { publicClient } from '../lib/client.js'
 
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000' as Address
 const ACTIVE_CROWN_CONTRACT = getAddress(CONTRACTS.crown)
-const ACTIVE_LOOT_CONTRACT = getAddress(CONTRACTS.loot)
+const CROWN_HISTORY_CONTRACTS = uniqueContractSet(CONTRACTS.crown, LEGACY_CONTRACTS.crown)
+const LOOT_HISTORY_CONTRACTS = uniqueContractSet(CONTRACTS.loot, LEGACY_CONTRACTS.loot)
 const CROWN_CACHE_TTL_MS = 2_500
 const CROWN_HISTORY_CACHE_TTL_MS = 10_000
 const MAX_LIVE_HOLDER_SCAN = 250
@@ -127,6 +128,10 @@ function toBigInt(value: string | number | bigint | null | undefined) {
   if (value == null) return 0n
   if (typeof value === 'bigint') return value
   return BigInt(String(value))
+}
+
+function uniqueContractSet(...addresses: Address[]) {
+  return [...new Set(addresses.map((address) => getAddress(address)))]
 }
 
 function toNumber(value: string | number | bigint | null | undefined) {
@@ -626,7 +631,7 @@ export async function getCrownStats(limit = 10) {
                 coalesce(sum(prize_pool), 0)::text as prize_paid
               from crown_rounds
               where settled = true
-                and contract_address = $2
+                and contract_address = any($2::text[])
                 and lower(winner) <> lower($1)
             ),
             fee_totals as (
@@ -637,33 +642,33 @@ export async function getCrownStats(limit = 10) {
                 coalesce(sum(admin_amount), 0)::text as admin_fees,
                 coalesce(sum(dividend_amount), 0)::text as dividend_fees
               from crown_purchases
-              where contract_address = $2
+              where contract_address = any($2::text[])
             )
             select *
             from round_totals, fee_totals
           `,
-          [ZERO_ADDRESS, ACTIVE_CROWN_CONTRACT]
+          [ZERO_ADDRESS, CROWN_HISTORY_CONTRACTS]
         ),
         pool.query<CrownBurnRow>(
           `
             select coalesce(sum(value), 0)::text as loot_burned
             from protocol_direct_burns
-            where contract_address = $1
+            where contract_address = any($1::text[])
               and lower(from_address) = lower($2)
           `,
-          [ACTIVE_LOOT_CONTRACT, vaults.buybackVault]
+          [LOOT_HISTORY_CONTRACTS, vaults.buybackVault]
         ),
         pool.query<CrownRoundRow>(
           `
             select *
             from crown_rounds
             where settled = true
-              and contract_address = $2
+              and contract_address = any($2::text[])
               and lower(winner) <> lower($1)
-            order by round_id desc
+            order by settled_block_number desc nulls last, round_id desc
             limit $3
           `,
-          [ZERO_ADDRESS, ACTIVE_CROWN_CONTRACT, safeLimit]
+          [ZERO_ADDRESS, CROWN_HISTORY_CONTRACTS, safeLimit]
         ),
       ])
 

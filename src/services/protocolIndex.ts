@@ -1,7 +1,7 @@
 import type { PoolClient } from 'pg'
 import { formatEther, formatUnits, getAddress, type Address } from 'viem'
 import gridMiningAbi from '../abis/GridMining.json' with { type: 'json' }
-import { ACTIVE_STACK_KEY, CONTRACTS, PROTOCOL_CONSTANTS } from '../config/contracts.js'
+import { ACTIVE_STACK_KEY, CONTRACTS, LEGACY_CONTRACTS, PROTOCOL_CONSTANTS } from '../config/contracts.js'
 import { hasProtocolIndexDatabase, getProtocolIndexPool } from '../lib/protocolIndexDb.js'
 import { decodeBlockMask, etherString, relativeTime, safeAddressEq } from '../lib/format.js'
 import { publicClient } from '../lib/client.js'
@@ -23,6 +23,11 @@ const ACTIVE_STAKING_CONTRACT = getAddress(CONTRACTS.staking)
 const ACTIVE_LOCKER_CONTRACT = getAddress(CONTRACTS.lootLocker)
 const ACTIVE_LOCKER_REWARDS_CONTRACT = getAddress(CONTRACTS.lockerRewards)
 const ACTIVE_CROWN_CONTRACT = getAddress(CONTRACTS.crown)
+const GRID_HISTORY_CONTRACTS = uniqueContractSet(CONTRACTS.gridMining, LEGACY_CONTRACTS.gridMining)
+const TREASURY_HISTORY_CONTRACTS = uniqueContractSet(CONTRACTS.treasury, LEGACY_CONTRACTS.treasury)
+const LOOT_HISTORY_CONTRACTS = uniqueContractSet(CONTRACTS.loot, LEGACY_CONTRACTS.loot)
+const LOCKER_REWARDS_HISTORY_CONTRACTS = uniqueContractSet(CONTRACTS.lockerRewards, LEGACY_CONTRACTS.lockerRewards)
+const CROWN_HISTORY_CONTRACTS = uniqueContractSet(CONTRACTS.crown, LEGACY_CONTRACTS.crown)
 let latestHeadCache: { expiresAt: number; value: bigint } | null = null
 let currentRoundIdCache: { expiresAt: number; value: bigint } | null = null
 
@@ -135,6 +140,10 @@ function toIsoString(value: Date | string | null | undefined) {
   if (value instanceof Date) return value.toISOString()
   const parsed = new Date(value)
   return Number.isFinite(parsed.getTime()) ? parsed.toISOString() : null
+}
+
+function uniqueContractSet(...addresses: Address[]) {
+  return [...new Set(addresses.map((address) => getAddress(address)))]
 }
 
 function stackStreamName(streamName: string) {
@@ -487,10 +496,20 @@ export async function getIndexedTreasuryStats() {
       `
       with vault as (
         select
-          coalesce(sum(amount), 0) as total_vaulted,
-          coalesce((array_agg(total_vaulted order by block_number desc, log_index desc))[1], 0) as current_vaulted
+          coalesce(sum(amount), 0) as total_vaulted
         from protocol_treasury_vault_events
-        where contract_address = $1
+        where contract_address = any($1::text[])
+      ),
+      current_vault as (
+        select coalesce(sum(total_vaulted), 0) as current_vaulted
+        from (
+          select distinct on (contract_address)
+            contract_address,
+            total_vaulted
+          from protocol_treasury_vault_events
+          where contract_address = any($1::text[])
+          order by contract_address, block_number desc, log_index desc
+        ) latest
       ),
       buybacks as (
         select
@@ -498,28 +517,28 @@ export async function getIndexedTreasuryStats() {
           coalesce(sum(loot_to_stakers), 0) as total_distributed_to_stakers,
           count(*)::text as total_buybacks
         from protocol_treasury_buybacks
-        where contract_address = $2
+        where contract_address = any($2::text[])
       ),
       burns as (
         select coalesce(sum(value), 0) as direct_burned
         from protocol_direct_burns b
-        where b.contract_address = $3
+        where b.contract_address = any($3::text[])
           and not exists (
           select 1 from protocol_treasury_buybacks bb
-          where bb.contract_address = $2
+          where bb.contract_address = any($2::text[])
             and bb.tx_hash = b.tx_hash
         )
       )
       select
         vault.total_vaulted::text,
-        vault.current_vaulted::text,
+        current_vault.current_vaulted::text,
         buybacks.buyback_burned::text,
         burns.direct_burned::text,
         buybacks.total_distributed_to_stakers::text,
         buybacks.total_buybacks
-      from vault, buybacks, burns
+      from vault, current_vault, buybacks, burns
     `,
-      [ACTIVE_TREASURY_CONTRACT, ACTIVE_TREASURY_CONTRACT, ACTIVE_LOOT_CONTRACT]
+      [TREASURY_HISTORY_CONTRACTS, TREASURY_HISTORY_CONTRACTS, LOOT_HISTORY_CONTRACTS]
     )
 
     const row = result.rows[0]
@@ -553,15 +572,15 @@ export async function getIndexedTreasuryStats() {
     const lagResult = await pool.query<{ latest_block: string }>(
       `
       with latest as (
-        select coalesce(max(block_number), 0) as latest_block from protocol_treasury_vault_events where contract_address = $1
+        select coalesce(max(block_number), 0) as latest_block from protocol_treasury_vault_events where contract_address = any($1::text[])
         union all
-        select coalesce(max(block_number), 0) as latest_block from protocol_treasury_buybacks where contract_address = $1
+        select coalesce(max(block_number), 0) as latest_block from protocol_treasury_buybacks where contract_address = any($1::text[])
         union all
-        select coalesce(max(block_number), 0) as latest_block from protocol_direct_burns where contract_address = $2
+        select coalesce(max(block_number), 0) as latest_block from protocol_direct_burns where contract_address = any($2::text[])
       )
       select coalesce(max(latest_block), 0)::text as latest_block from latest
     `,
-      [ACTIVE_TREASURY_CONTRACT, ACTIVE_LOOT_CONTRACT]
+      [TREASURY_HISTORY_CONTRACTS, LOOT_HISTORY_CONTRACTS]
     )
 
     const latestIndexedBlock = toBigInt(lagResult.rows[0]?.latest_block ?? '0')
@@ -584,20 +603,20 @@ export async function getIndexedBuybacks(page = 1, limit = 12) {
     const totalResult = await client.query<{ total: string }>(
       `
       with events as (
-        select tx_hash, log_index from protocol_treasury_buybacks where contract_address = $1
+        select tx_hash, log_index from protocol_treasury_buybacks where contract_address = any($1::text[])
         union all
         select b.tx_hash, b.log_index
         from protocol_direct_burns b
-        where b.contract_address = $2
+        where b.contract_address = any($2::text[])
           and not exists (
           select 1 from protocol_treasury_buybacks bb
-          where bb.contract_address = $1
+          where bb.contract_address = any($1::text[])
             and bb.tx_hash = b.tx_hash
         )
       )
       select count(*)::text as total from events
     `,
-      [ACTIVE_TREASURY_CONTRACT, ACTIVE_LOOT_CONTRACT]
+      [TREASURY_HISTORY_CONTRACTS, LOOT_HISTORY_CONTRACTS]
     )
 
     const rows = await client.query<BuybackRow>(
@@ -615,12 +634,12 @@ export async function getIndexedBuybacks(page = 1, limit = 12) {
                 select coalesce(sum(cp.buyback_amount), 0)::text
                 from crown_purchases cp
                 where cp.block_number <= b.block_number
-                  and cp.contract_address = $6
+                  and cp.contract_address = any($6::text[])
                   and cp.block_number > coalesce((
                     select max(prev.block_number)
                     from protocol_direct_burns prev
                     where lower(prev.from_address) = lower($3)
-                      and prev.contract_address = $5
+                      and prev.contract_address = any($5::text[])
                       and (
                         prev.block_number < b.block_number
                         or (prev.block_number = b.block_number and prev.log_index < b.log_index)
@@ -634,10 +653,10 @@ export async function getIndexedBuybacks(page = 1, limit = 12) {
             null::text as loot_to_stakers,
             b.from_address as burned_by
           from protocol_direct_burns b
-          where b.contract_address = $5
+          where b.contract_address = any($5::text[])
             and not exists (
             select 1 from protocol_treasury_buybacks bb
-            where bb.contract_address = $4
+            where bb.contract_address = any($4::text[])
               and bb.tx_hash = b.tx_hash
           )
         ),
@@ -655,7 +674,7 @@ export async function getIndexedBuybacks(page = 1, limit = 12) {
             loot_to_stakers::text,
             null::text as burned_by
           from protocol_treasury_buybacks
-          where contract_address = $4
+          where contract_address = any($4::text[])
         )
         select *
         from (
@@ -666,7 +685,14 @@ export async function getIndexedBuybacks(page = 1, limit = 12) {
         order by block_number::bigint desc, log_index desc
         limit $1 offset $2
       `,
-      [safeLimit, offset, CROWN_BUYBACK_VAULT, ACTIVE_TREASURY_CONTRACT, ACTIVE_LOOT_CONTRACT, ACTIVE_CROWN_CONTRACT]
+      [
+        safeLimit,
+        offset,
+        CROWN_BUYBACK_VAULT,
+        TREASURY_HISTORY_CONTRACTS,
+        LOOT_HISTORY_CONTRACTS,
+        CROWN_HISTORY_CONTRACTS,
+      ]
     )
 
     const total = Number(totalResult.rows[0]?.total ?? '0')
@@ -853,7 +879,7 @@ export async function getIndexedLockSnapshot() {
           coalesce(sum(amount), 0)::text as total_notified,
           coalesce(sum(case when block_timestamp >= now() - ($3::text || ' days')::interval then distributed_amount else 0 end), 0)::text as distributed_in_window
         from protocol_lock_reward_notified
-        where contract_address = $2
+        where contract_address = any($2::text[])
       )
       select
         coalesce(sum(case when locked_amount > 0 then locked_amount else 0 end), 0)::text as protocol_locked,
@@ -862,7 +888,7 @@ export async function getIndexedLockSnapshot() {
         (select distributed_in_window from rewards),
         coalesce((select protocol_weight from latest_weight), '0') as protocol_weight
       from locked
-    `, [ACTIVE_LOCKER_CONTRACT, ACTIVE_LOCKER_REWARDS_CONTRACT, String(LOCK_APR_WINDOW_DAYS)])
+    `, [ACTIVE_LOCKER_CONTRACT, LOCKER_REWARDS_HISTORY_CONTRACTS, String(LOCK_APR_WINDOW_DAYS)])
 
     const row = result.rows[0]
     return {
@@ -889,8 +915,8 @@ export async function getIndexedLockDistributions(page = 1, limit = 12) {
     if (!snapshot) return null
 
     const totalResult = await client.query<{ total: string }>(
-      'select count(*)::text as total from protocol_lock_reward_notified where contract_address = $1',
-      [ACTIVE_LOCKER_REWARDS_CONTRACT]
+      'select count(*)::text as total from protocol_lock_reward_notified where contract_address = any($1::text[])',
+      [LOCKER_REWARDS_HISTORY_CONTRACTS]
     )
     const rows = await client.query<{
       tx_hash: string
@@ -909,11 +935,11 @@ export async function getIndexedLockDistributions(page = 1, limit = 12) {
           distributed_amount::text,
           unallocated_amount::text
         from protocol_lock_reward_notified
-        where contract_address = $1
+        where contract_address = any($1::text[])
         order by block_number desc, log_index desc
         limit $2 offset $3
       `,
-      [ACTIVE_LOCKER_REWARDS_CONTRACT, safeLimit, offset]
+      [LOCKER_REWARDS_HISTORY_CONTRACTS, safeLimit, offset]
     )
 
     const total = Number(totalResult.rows[0]?.total ?? '0')
@@ -955,14 +981,14 @@ export async function getIndexedLeaderboardMiners(limit = 12) {
         select
           user_address as address,
           sum(total_amount)::text as total_deployed,
-          count(distinct round_id)::text as rounds_played
+          count(distinct (contract_address, round_id))::text as rounds_played
         from protocol_deployments
-        where contract_address = $1
+        where contract_address = any($1::text[])
         group by user_address
         order by sum(total_amount) desc
         limit $2
       `,
-      [ACTIVE_GRID_CONTRACT, limit]
+      [GRID_HISTORY_CONTRACTS, limit]
     )
 
     const deployers = result.rows.map((row) => ({
