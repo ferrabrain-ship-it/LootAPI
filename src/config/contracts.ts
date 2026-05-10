@@ -6,7 +6,7 @@ export const CONTRACTS = {
   treasuryAgent: '0x8090188Eeae4B84Fd3cFB8f53AdccB30a0a17b21' as Address,
   gridMining: '0x5C37c4cF90094cbF8d7e44A82141BccbE9Aff93e' as Address,
   autoMiner: '0x9AccD84987d671e8092A000ACB225FE8dFB9096C' as Address,
-  crown: '0x3716aD6AE9c75CB8EDe11b26e57c6ef0fBA01C6e' as Address,
+  crown: '0xa4A2E37d9e98F8036ed3fa2653252D7bB7b50fEa' as Address,
   autoCrown: '0x49B28C128eB8aec3c6b5e14D4d850106E50C98Ba' as Address,
   lootCases: '0x5a516A7468dd2bb632a717EDd7B8413e16C1221a' as Address,
   goldCases: '0x5a516A7468dd2bb632a717EDd7B8413e16C1221a' as Address,

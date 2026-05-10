@@ -67,6 +67,32 @@
   },
   {
     "type": "function",
+    "name": "MIN_CALLBACK_GAS_LIMIT",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint32",
+        "internalType": "uint32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "MIN_REQUEST_CONFIRMATIONS",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint16",
+        "internalType": "uint16"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "ODDS_DENOMINATOR",
     "inputs": [],
     "outputs": [
@@ -2051,6 +2077,11 @@
   {
     "type": "error",
     "name": "InvalidClaimAmount",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvalidFeeRecipient",
     "inputs": []
   },
   {

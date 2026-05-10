@@ -109,6 +109,19 @@
   },
   {
     "type": "function",
+    "name": "MIN_CALLBACK_GAS_LIMIT",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint32",
+        "internalType": "uint32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "MIN_DEPLOY",
     "inputs": [],
     "outputs": [
@@ -1654,6 +1667,11 @@
   {
     "type": "error",
     "name": "InvalidLootpotAccumulation",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvalidVRFConfig",
     "inputs": []
   },
   {
