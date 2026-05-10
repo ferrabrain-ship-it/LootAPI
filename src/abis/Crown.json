@@ -8,6 +8,11 @@
         "internalType": "address"
       },
       {
+        "name": "lootToken",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
         "name": "adminVault_",
         "type": "address",
         "internalType": "address"
@@ -189,6 +194,19 @@
   },
   {
     "type": "function",
+    "name": "WINNER_PAYOUT_BPS",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "WINNING_ROLL",
     "inputs": [],
     "outputs": [
@@ -261,6 +279,19 @@
   },
   {
     "type": "function",
+    "name": "buyChestETH",
+    "inputs": [
+      {
+        "name": "maxAcceptedPrice",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "payable"
+  },
+  {
+    "type": "function",
     "name": "buyChestFor",
     "inputs": [
       {
@@ -279,7 +310,38 @@
   },
   {
     "type": "function",
+    "name": "buyChestLOOT",
+    "inputs": [
+      {
+        "name": "maxAcceptedLootPrice",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "buyChests",
+    "inputs": [
+      {
+        "name": "amount",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "maxTotalPrice",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "payable"
+  },
+  {
+    "type": "function",
+    "name": "buyChestsETH",
     "inputs": [
       {
         "name": "amount",
@@ -317,6 +379,24 @@
     ],
     "outputs": [],
     "stateMutability": "payable"
+  },
+  {
+    "type": "function",
+    "name": "buyChestsLOOT",
+    "inputs": [
+      {
+        "name": "amount",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "maxTotalLootPrice",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
@@ -379,6 +459,25 @@
   },
   {
     "type": "function",
+    "name": "claimableLootPrize",
+    "inputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "claimablePrize",
     "inputs": [
       {
@@ -408,6 +507,19 @@
       }
     ],
     "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "depositLootPot",
+    "inputs": [
+      {
+        "name": "amount",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
@@ -499,6 +611,39 @@
       },
       {
         "name": "timeRemaining",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "getCurrentRoundPots",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "roundId",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "ethPot",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "lootPot",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "nextEthPrice",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "nextLootPrice",
         "type": "uint256",
         "internalType": "uint256"
       }
@@ -681,6 +826,19 @@
   },
   {
     "type": "function",
+    "name": "loot",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "contract ICrownLoot"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "maxPrice",
     "inputs": [],
     "outputs": [
@@ -720,6 +878,32 @@
   },
   {
     "type": "function",
+    "name": "quoteChestETH",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "quoteChestLOOT",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "quoteChests",
     "inputs": [
       {
@@ -736,6 +920,44 @@
       },
       {
         "name": "finalPrice",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "quoteChestsETH",
+    "inputs": [
+      {
+        "name": "amount",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "totalPrice",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "quoteChestsLOOT",
+    "inputs": [
+      {
+        "name": "amount",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "totalLootPrice",
         "type": "uint256",
         "internalType": "uint256"
       }
@@ -766,100 +988,6 @@
     "inputs": [],
     "outputs": [],
     "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
-    "name": "rounds",
-    "inputs": [
-      {
-        "name": "",
-        "type": "uint64",
-        "internalType": "uint64"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "startTime",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "endTime",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "nextRollAt",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "totalSold",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "prizePool",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "accDividendPerChest",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "holderCount",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "vrfRequestId",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "vrfRequestedAt",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "winningRoll",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "currentLeader",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "leaderSnapshot",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "winner",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "active",
-        "type": "bool",
-        "internalType": "bool"
-      },
-      {
-        "name": "settled",
-        "type": "bool",
-        "internalType": "bool"
-      },
-      {
-        "name": "vrfPending",
-        "type": "bool",
-        "internalType": "bool"
-      }
-    ],
-    "stateMutability": "view"
   },
   {
     "type": "function",
@@ -1197,6 +1325,43 @@
   },
   {
     "type": "event",
+    "name": "ChestPurchasedLOOT",
+    "inputs": [
+      {
+        "name": "roundId",
+        "type": "uint64",
+        "indexed": true,
+        "internalType": "uint64"
+      },
+      {
+        "name": "user",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "lootPrice",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "totalSold",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "leader",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "ChestsPurchased",
     "inputs": [
       {
@@ -1219,6 +1384,49 @@
       },
       {
         "name": "totalPrice",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "totalSold",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "leader",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "ChestsPurchasedLOOT",
+    "inputs": [
+      {
+        "name": "roundId",
+        "type": "uint64",
+        "indexed": true,
+        "internalType": "uint64"
+      },
+      {
+        "name": "user",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "amount",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "totalLootPrice",
         "type": "uint256",
         "indexed": false,
         "internalType": "uint256"
@@ -1269,6 +1477,31 @@
       },
       {
         "name": "amount",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "ClaimedPrizeDual",
+    "inputs": [
+      {
+        "name": "user",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "ethAmount",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "lootAmount",
         "type": "uint256",
         "indexed": false,
         "internalType": "uint256"
@@ -1342,6 +1575,31 @@
         "type": "address",
         "indexed": true,
         "internalType": "address"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "LootPotFunded",
+    "inputs": [
+      {
+        "name": "roundId",
+        "type": "uint64",
+        "indexed": true,
+        "internalType": "uint64"
+      },
+      {
+        "name": "funder",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "amount",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
       }
     ],
     "anonymous": false
@@ -1489,6 +1747,55 @@
       },
       {
         "name": "totalSold",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "roll",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "RoundSettledDual",
+    "inputs": [
+      {
+        "name": "roundId",
+        "type": "uint64",
+        "indexed": true,
+        "internalType": "uint64"
+      },
+      {
+        "name": "winner",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "ethPaid",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "lootPaid",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "ethRollover",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "lootRollover",
         "type": "uint256",
         "indexed": false,
         "internalType": "uint256"

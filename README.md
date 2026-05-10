@@ -38,12 +38,15 @@ Recommended backend env:
 
 ```env
 LOYALTY_SCAN_START_BLOCK=43103600
+NEW_STACK_SCAN_START_BLOCK=45791564
 CROWN_SCAN_START_BLOCK=45143591
 ```
 
 If you omit `LOYALTY_SCAN_START_BLOCK`, the API auto-detects the deployment block of the Mineloot contracts and scans from there. That works, but the first requests are slower.
 
 Crown uses `CROWN_SCAN_START_BLOCK` so the protocol indexer can start from the Crown deployment window instead of scanning older mining blocks.
+
+The LootGames stack uses `NEW_STACK_SCAN_START_BLOCK`. Existing indexed MineLoot rows are preserved; new index streams use a separate stack suffix and DB rows are keyed by contract address where round/request ids can restart.
 
 ## Crown API
 
@@ -81,6 +84,7 @@ RPC_URL_FALLBACK_1=https://base.llamarpc.com
 RPC_URL_FALLBACK_2=https://rpc.ankr.com/base
 RPC_URL_FALLBACK_3=https://base-rpc.publicnode.com
 LOYALTY_SCAN_START_BLOCK=43103600
+NEW_STACK_SCAN_START_BLOCK=45791564
 CROWN_SCAN_START_BLOCK=45143591
 SUPABASE_URL=
 SUPABASE_SERVICE_ROLE_KEY=

@@ -36,7 +36,7 @@ const DEPLOYED_FOR_EVENT = parseAbiItem(
   'event DeployedFor(uint64 indexed roundId, address indexed user, address indexed executor, uint256 amountPerBlock, uint256 blockMask, uint256 totalAmount)'
 )
 const ROUND_SETTLED_EVENT = parseAbiItem(
-  'event RoundSettled(uint64 indexed roundId, uint8 winningBlock, address topMiner, uint256 totalWinnings, uint256 topMinerReward, uint256 lootpotAmount, bool isSplit, uint256 topMinerSeed, uint256 winnersDeployed)'
+  'event RoundSettled(uint64 indexed roundId, uint8 winningBlock, address topMiner, uint256 totalWinnings, uint256 topMinerReward, uint256 lootpotAmount, uint256 ethpotAmount, bool isSplit, uint256 topMinerSeed, uint256 winnersDeployed)'
 )
 const GAME_STARTED_EVENT = parseAbiItem('event GameStarted(uint64 indexed roundId, uint256 startTime, uint256 endTime)')
 const BUYBACK_EVENT = parseAbiItem(
@@ -119,6 +119,8 @@ type CurrentRoundResponse = {
   totalDeployedFormatted: string
   lootpotPool: string
   lootpotPoolFormatted: string
+  ethpotPool: string
+  ethpotPoolFormatted: string
   settled: boolean
   blocks: Array<{
     id: number
@@ -1098,7 +1100,7 @@ function computeUserDeployed(mask: bigint, amountPerBlock: bigint) {
 export async function getCurrentRound(user?: string) {
   const getCurrentRoundBase = () =>
     withCache('current-round:base', 2_000, async (): Promise<CurrentRoundResponse> => {
-      const [roundInfo, lootpotPool, latestBlock] = await Promise.all([
+      const [roundInfo, lootpotPool, ethpotPool, latestBlock] = await Promise.all([
         withRpcRetries(() => publicClient.readContract({
           address: CONTRACTS.gridMining,
           abi: gridMiningAbi,
@@ -1108,6 +1110,11 @@ export async function getCurrentRound(user?: string) {
           address: CONTRACTS.gridMining,
           abi: gridMiningAbi,
           functionName: 'lootpotPool',
+        }) as Promise<bigint>),
+        withRpcRetries(() => publicClient.readContract({
+          address: CONTRACTS.gridMining,
+          abi: gridMiningAbi,
+          functionName: 'ethpotPool',
         }) as Promise<bigint>),
         withRpcRetries(() => publicClient.getBlockNumber()),
       ])
@@ -1122,6 +1129,8 @@ export async function getCurrentRound(user?: string) {
           totalDeployedFormatted: '0',
           lootpotPool: lootpotPool.toString(),
           lootpotPoolFormatted: etherString(lootpotPool),
+          ethpotPool: ethpotPool.toString(),
+          ethpotPoolFormatted: etherString(ethpotPool),
           settled: false,
           blocks: Array.from({ length: PROTOCOL_CONSTANTS.gridSize }, (_, id) => ({
             id,
@@ -1144,6 +1153,8 @@ export async function getCurrentRound(user?: string) {
         totalDeployedFormatted: etherString(totalDeployed),
         lootpotPool: lootpotPool.toString(),
         lootpotPoolFormatted: etherString(lootpotPool),
+        ethpotPool: ethpotPool.toString(),
+        ethpotPoolFormatted: etherString(ethpotPool),
         settled: false,
         blocks,
         userDeployed: '0',
@@ -1231,13 +1242,13 @@ async function getRoundState(roundId: bigint) {
         abi: gridMiningAbi,
         functionName: 'rounds',
         args: [roundId],
-      }) as Promise<[bigint, bigint, bigint, bigint, bigint, number, Address, bigint, bigint, bigint, bigint, boolean, bigint]>),
+      }) as Promise<[bigint, bigint, bigint, bigint, bigint, number, Address, bigint, bigint, bigint, bigint, bigint, boolean, bigint]>),
       withRpcRetries(() => publicClient.readContract({
         address: CONTRACTS.gridMining,
         abi: gridMiningAbi,
         functionName: 'getRound',
         args: [roundId],
-      }) as Promise<[bigint, bigint, bigint, bigint, number, Address, bigint, bigint, boolean]>),
+      }) as Promise<[bigint, bigint, bigint, bigint, number, Address, bigint, bigint, bigint, boolean]>),
       getRoundSettledLogForRound(roundId, recent),
     ])
 
@@ -1251,10 +1262,11 @@ async function getRoundState(roundId: bigint) {
       topMiner: roundStruct[6],
       topMinerReward: toBigInt(roundStruct[7]),
       lootpotAmount: toBigInt(roundStruct[8]),
-      vrfRequestId: toBigInt(roundStruct[9]),
-      topMinerSeed: toBigInt(roundStruct[10]),
-      settled: roundStruct[11],
-      minerCount: toBigInt(roundStruct[12]),
+      ethpotAmount: toBigInt(roundStruct[9]),
+      vrfRequestId: toBigInt(roundStruct[10]),
+      topMinerSeed: toBigInt(roundStruct[11]),
+      settled: roundStruct[12],
+      minerCount: toBigInt(roundStruct[13]),
       settledLog,
       roundView,
       isSplit: settledLog?.args.isSplit ?? roundStruct[6] === '0x0000000000000000000000000000000000000000',
@@ -1297,6 +1309,8 @@ export async function getRound(roundIdInput: string | number | bigint) {
         totalWinningsFormatted: etherString(roundState.totalWinnings),
         lootpotAmount: roundState.lootpotAmount.toString(),
         lootpotAmountFormatted: etherString(roundState.lootpotAmount),
+        ethpotAmount: roundState.ethpotAmount.toString(),
+        ethpotAmountFormatted: etherString(roundState.ethpotAmount),
         startTime: Number(roundState.startTime),
         endTime: Number(roundState.endTime),
         settledAt: new Date(settledAtMs).toISOString(),
@@ -1329,6 +1343,8 @@ export async function getRound(roundIdInput: string | number | bigint) {
       totalWinningsFormatted: etherString(roundState.totalWinnings),
       lootpotAmount: roundState.lootpotAmount.toString(),
       lootpotAmountFormatted: etherString(roundState.lootpotAmount),
+      ethpotAmount: roundState.ethpotAmount.toString(),
+      ethpotAmountFormatted: etherString(roundState.ethpotAmount),
       startTime: Number(roundState.startTime),
       endTime: Number(roundState.endTime),
       settledAt: new Date(settledAtMs).toISOString(),
@@ -1540,7 +1556,7 @@ export async function getCopilotContext(lookback = 1000) {
 
       return {
         metrics: {
-          maxSupply: '3000000',
+          maxSupply: formatEther(PROTOCOL_CONSTANTS.initialSupply),
           totalMinted: stats.totalMinted,
           totalMintedFormatted: stats.totalMintedFormatted,
           lootPriceUsd: stats.loot.priceUsd,
@@ -1658,7 +1674,7 @@ export async function getCopilotContext(lookback = 1000) {
 
     return {
       metrics: {
-        maxSupply: '3000000',
+        maxSupply: formatEther(PROTOCOL_CONSTANTS.initialSupply),
         totalMinted: stats.totalMinted,
         totalMintedFormatted: stats.totalMintedFormatted,
         lootPriceUsd: stats.loot.priceUsd,
@@ -2663,6 +2679,7 @@ export async function getLatestRoundTransition() {
       totalWinnings: toBigInt(settledLog.args.totalWinnings).toString(),
       topMinerReward: toBigInt(settledLog.args.topMinerReward).toString(),
       lootpotAmount: toBigInt(settledLog.args.lootpotAmount).toString(),
+      ethpotAmount: toBigInt(settledLog.args.ethpotAmount).toString(),
       isSplit: Boolean(settledLog.args.isSplit),
       settledAt: settledAtMs ? new Date(settledAtMs).toISOString() : undefined,
     } : null,
@@ -2672,6 +2689,8 @@ export async function getLatestRoundTransition() {
       endTime: current.endTime,
       lootpotPool: current.lootpotPool,
       lootpotPoolFormatted: current.lootpotPoolFormatted,
+      ethpotPool: current.ethpotPool,
+      ethpotPoolFormatted: current.ethpotPoolFormatted,
     },
   }
 }

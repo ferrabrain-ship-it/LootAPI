@@ -1,5 +1,6 @@
 import { Pool } from 'pg'
 import { env } from '../config/env.js'
+import { LEGACY_CONTRACTS } from '../config/contracts.js'
 
 const PROTOCOL_INDEX_SCHEMA_SQL = `
 create table if not exists protocol_sync_state (
@@ -9,6 +10,7 @@ create table if not exists protocol_sync_state (
 );
 
 create table if not exists protocol_rounds (
+  contract_address text not null default '${LEGACY_CONTRACTS.gridMining}',
   round_id bigint primary key,
   start_time bigint not null,
   end_time bigint not null,
@@ -19,6 +21,7 @@ create table if not exists protocol_rounds (
   top_miner text not null,
   top_miner_reward numeric(78,0) not null,
   lootpot_amount numeric(78,0) not null,
+  ethpot_amount numeric(78,0) not null default 0,
   vrf_request_id numeric(78,0) not null,
   top_miner_seed numeric(78,0) not null,
   settled boolean not null default false,
@@ -32,6 +35,7 @@ create table if not exists protocol_rounds (
 );
 
 create table if not exists protocol_deployments (
+  contract_address text not null default '${LEGACY_CONTRACTS.gridMining}',
   tx_hash text not null,
   log_index integer not null,
   event_name text not null,
@@ -47,6 +51,7 @@ create table if not exists protocol_deployments (
 );
 
 create table if not exists protocol_checkpoints (
+  contract_address text not null default '${LEGACY_CONTRACTS.gridMining}',
   tx_hash text not null,
   log_index integer not null,
   round_id bigint not null,
@@ -59,6 +64,7 @@ create table if not exists protocol_checkpoints (
 );
 
 create table if not exists protocol_claimed_loot (
+  contract_address text not null default '${LEGACY_CONTRACTS.gridMining}',
   tx_hash text not null,
   log_index integer not null,
   user_address text not null,
@@ -72,6 +78,7 @@ create table if not exists protocol_claimed_loot (
 );
 
 create table if not exists protocol_treasury_vault_events (
+  contract_address text not null default '${LEGACY_CONTRACTS.treasury}',
   tx_hash text not null,
   log_index integer not null,
   amount numeric(78,0) not null,
@@ -82,6 +89,7 @@ create table if not exists protocol_treasury_vault_events (
 );
 
 create table if not exists protocol_treasury_buybacks (
+  contract_address text not null default '${LEGACY_CONTRACTS.treasury}',
   tx_hash text not null,
   log_index integer not null,
   eth_spent numeric(78,0) not null,
@@ -94,6 +102,7 @@ create table if not exists protocol_treasury_buybacks (
 );
 
 create table if not exists protocol_direct_burns (
+  contract_address text not null default '${LEGACY_CONTRACTS.loot}',
   tx_hash text not null,
   log_index integer not null,
   from_address text not null,
@@ -104,6 +113,7 @@ create table if not exists protocol_direct_burns (
 );
 
 create table if not exists protocol_staking_deposits (
+  contract_address text not null default '${LEGACY_CONTRACTS.staking}',
   tx_hash text not null,
   log_index integer not null,
   user_address text not null,
@@ -115,6 +125,7 @@ create table if not exists protocol_staking_deposits (
 );
 
 create table if not exists protocol_staking_withdrawals (
+  contract_address text not null default '${LEGACY_CONTRACTS.staking}',
   tx_hash text not null,
   log_index integer not null,
   user_address text not null,
@@ -126,6 +137,7 @@ create table if not exists protocol_staking_withdrawals (
 );
 
 create table if not exists protocol_staking_compounds (
+  contract_address text not null default '${LEGACY_CONTRACTS.staking}',
   tx_hash text not null,
   log_index integer not null,
   user_address text not null,
@@ -138,6 +150,7 @@ create table if not exists protocol_staking_compounds (
 );
 
 create table if not exists protocol_staking_yield_distributions (
+  contract_address text not null default '${LEGACY_CONTRACTS.staking}',
   tx_hash text not null,
   log_index integer not null,
   amount numeric(78,0) not null,
@@ -148,6 +161,7 @@ create table if not exists protocol_staking_yield_distributions (
 );
 
 create table if not exists protocol_lock_reward_notified (
+  contract_address text not null default '${LEGACY_CONTRACTS.lockerRewards}',
   tx_hash text not null,
   log_index integer not null,
   amount numeric(78,0) not null,
@@ -160,6 +174,7 @@ create table if not exists protocol_lock_reward_notified (
 );
 
 create table if not exists protocol_locker_events (
+  contract_address text not null default '${LEGACY_CONTRACTS.lootLocker}',
   tx_hash text not null,
   log_index integer not null,
   event_name text not null,
@@ -214,6 +229,7 @@ alter table protocol_treasury_agent_holdings
   add column if not exists location_label text;
 
 create table if not exists crown_rounds (
+  contract_address text not null default '${LEGACY_CONTRACTS.crown}',
   round_id bigint primary key,
   start_time bigint not null default 0,
   end_time bigint not null default 0,
@@ -239,6 +255,7 @@ create table if not exists crown_rounds (
 );
 
 create table if not exists crown_purchases (
+  contract_address text not null default '${LEGACY_CONTRACTS.crown}',
   tx_hash text not null,
   log_index integer not null,
   round_id bigint not null,
@@ -257,6 +274,7 @@ create table if not exists crown_purchases (
 );
 
 create table if not exists crown_batch_purchases (
+  contract_address text not null default '${LEGACY_CONTRACTS.crown}',
   tx_hash text not null,
   log_index integer not null,
   round_id bigint not null,
@@ -271,6 +289,7 @@ create table if not exists crown_batch_purchases (
 );
 
 create table if not exists crown_roll_events (
+  contract_address text not null default '${LEGACY_CONTRACTS.crown}',
   tx_hash text not null,
   log_index integer not null,
   event_name text not null,
@@ -285,6 +304,7 @@ create table if not exists crown_roll_events (
 );
 
 create table if not exists crown_claims (
+  contract_address text not null default '${LEGACY_CONTRACTS.crown}',
   tx_hash text not null,
   log_index integer not null,
   event_name text not null,
@@ -296,6 +316,7 @@ create table if not exists crown_claims (
 );
 
 create table if not exists autocrown_configs (
+  contract_address text not null default '${LEGACY_CONTRACTS.autoCrown}',
   user_address text primary key,
   active boolean not null default true,
   open_new_round boolean not null,
@@ -316,6 +337,7 @@ create table if not exists autocrown_configs (
 );
 
 create table if not exists autocrown_deposits (
+  contract_address text not null default '${LEGACY_CONTRACTS.autoCrown}',
   tx_hash text not null,
   log_index integer not null,
   user_address text not null,
@@ -327,6 +349,7 @@ create table if not exists autocrown_deposits (
 );
 
 create table if not exists autocrown_executions (
+  contract_address text not null default '${LEGACY_CONTRACTS.autoCrown}',
   tx_hash text not null,
   log_index integer not null,
   event_name text not null,
@@ -343,6 +366,7 @@ create table if not exists autocrown_executions (
 );
 
 create table if not exists autocrown_stops (
+  contract_address text not null default '${LEGACY_CONTRACTS.autoCrown}',
   tx_hash text not null,
   log_index integer not null,
   user_address text not null,
@@ -353,6 +377,7 @@ create table if not exists autocrown_stops (
 );
 
 create table if not exists gold_case_opens (
+  contract_address text not null default '${LEGACY_CONTRACTS.goldCases}',
   tx_hash text not null,
   log_index integer not null,
   request_id numeric(78,0) not null,
@@ -368,6 +393,7 @@ create table if not exists gold_case_opens (
 );
 
 create table if not exists gold_case_resolutions (
+  contract_address text not null default '${LEGACY_CONTRACTS.goldCases}',
   tx_hash text not null,
   log_index integer not null,
   request_id numeric(78,0) not null,
@@ -384,6 +410,7 @@ create table if not exists gold_case_resolutions (
 );
 
 create table if not exists gold_case_results (
+  contract_address text not null default '${LEGACY_CONTRACTS.goldCases}',
   request_id numeric(78,0) not null,
   chest_index integer not null,
   tx_hash text not null,
@@ -401,6 +428,65 @@ create table if not exists gold_case_results (
   block_timestamp timestamptz,
   primary key (request_id, chest_index)
 );
+
+alter table protocol_rounds add column if not exists contract_address text;
+alter table protocol_rounds add column if not exists ethpot_amount numeric(78,0) not null default 0;
+update protocol_rounds set contract_address = '${LEGACY_CONTRACTS.gridMining}' where contract_address is null;
+alter table protocol_rounds alter column contract_address set default '${LEGACY_CONTRACTS.gridMining}';
+alter table protocol_rounds alter column contract_address set not null;
+alter table protocol_rounds drop constraint if exists protocol_rounds_pkey;
+alter table protocol_rounds add constraint protocol_rounds_pkey primary key (contract_address, round_id);
+
+alter table crown_rounds add column if not exists contract_address text;
+update crown_rounds set contract_address = '${LEGACY_CONTRACTS.crown}' where contract_address is null;
+alter table crown_rounds alter column contract_address set default '${LEGACY_CONTRACTS.crown}';
+alter table crown_rounds alter column contract_address set not null;
+alter table crown_rounds drop constraint if exists crown_rounds_pkey;
+alter table crown_rounds add constraint crown_rounds_pkey primary key (contract_address, round_id);
+
+alter table autocrown_configs add column if not exists contract_address text;
+update autocrown_configs set contract_address = '${LEGACY_CONTRACTS.autoCrown}' where contract_address is null;
+alter table autocrown_configs alter column contract_address set default '${LEGACY_CONTRACTS.autoCrown}';
+alter table autocrown_configs alter column contract_address set not null;
+alter table autocrown_configs drop constraint if exists autocrown_configs_pkey;
+alter table autocrown_configs add constraint autocrown_configs_pkey primary key (contract_address, user_address);
+
+alter table gold_case_results add column if not exists contract_address text;
+update gold_case_results set contract_address = '${LEGACY_CONTRACTS.goldCases}' where contract_address is null;
+alter table gold_case_results alter column contract_address set default '${LEGACY_CONTRACTS.goldCases}';
+alter table gold_case_results alter column contract_address set not null;
+alter table gold_case_results drop constraint if exists gold_case_results_pkey;
+alter table gold_case_results add constraint gold_case_results_pkey primary key (contract_address, request_id, chest_index);
+alter table gold_case_opens add column if not exists contract_address text not null default '${LEGACY_CONTRACTS.goldCases}';
+alter table gold_case_resolutions add column if not exists contract_address text not null default '${LEGACY_CONTRACTS.goldCases}';
+alter table gold_case_opens drop constraint if exists gold_case_opens_request_id_key;
+alter table gold_case_opens drop constraint if exists gold_case_opens_contract_request_unique;
+alter table gold_case_opens add constraint gold_case_opens_contract_request_unique unique (contract_address, request_id);
+alter table gold_case_resolutions drop constraint if exists gold_case_resolutions_request_id_key;
+alter table gold_case_resolutions drop constraint if exists gold_case_resolutions_contract_request_unique;
+alter table gold_case_resolutions add constraint gold_case_resolutions_contract_request_unique unique (contract_address, request_id);
+
+alter table protocol_deployments add column if not exists contract_address text not null default '${LEGACY_CONTRACTS.gridMining}';
+alter table protocol_checkpoints add column if not exists contract_address text not null default '${LEGACY_CONTRACTS.gridMining}';
+alter table protocol_claimed_loot add column if not exists contract_address text not null default '${LEGACY_CONTRACTS.gridMining}';
+alter table protocol_treasury_vault_events add column if not exists contract_address text not null default '${LEGACY_CONTRACTS.treasury}';
+alter table protocol_treasury_buybacks add column if not exists contract_address text not null default '${LEGACY_CONTRACTS.treasury}';
+alter table protocol_direct_burns add column if not exists contract_address text not null default '${LEGACY_CONTRACTS.loot}';
+alter table protocol_staking_deposits add column if not exists contract_address text not null default '${LEGACY_CONTRACTS.staking}';
+alter table protocol_staking_withdrawals add column if not exists contract_address text not null default '${LEGACY_CONTRACTS.staking}';
+alter table protocol_staking_compounds add column if not exists contract_address text not null default '${LEGACY_CONTRACTS.staking}';
+alter table protocol_staking_yield_distributions add column if not exists contract_address text not null default '${LEGACY_CONTRACTS.staking}';
+alter table protocol_lock_reward_notified add column if not exists contract_address text not null default '${LEGACY_CONTRACTS.lockerRewards}';
+alter table protocol_locker_events add column if not exists contract_address text not null default '${LEGACY_CONTRACTS.lootLocker}';
+alter table crown_purchases add column if not exists contract_address text not null default '${LEGACY_CONTRACTS.crown}';
+alter table crown_batch_purchases add column if not exists contract_address text not null default '${LEGACY_CONTRACTS.crown}';
+alter table crown_roll_events add column if not exists contract_address text not null default '${LEGACY_CONTRACTS.crown}';
+alter table crown_claims add column if not exists contract_address text not null default '${LEGACY_CONTRACTS.crown}';
+alter table autocrown_deposits add column if not exists contract_address text not null default '${LEGACY_CONTRACTS.autoCrown}';
+alter table autocrown_executions add column if not exists contract_address text not null default '${LEGACY_CONTRACTS.autoCrown}';
+alter table autocrown_stops add column if not exists contract_address text not null default '${LEGACY_CONTRACTS.autoCrown}';
+alter table gold_case_opens add column if not exists contract_address text not null default '${LEGACY_CONTRACTS.goldCases}';
+alter table gold_case_resolutions add column if not exists contract_address text not null default '${LEGACY_CONTRACTS.goldCases}';
 
 create index if not exists idx_protocol_rounds_settled_block
   on protocol_rounds (settled_block_number desc);

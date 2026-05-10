@@ -3,7 +3,7 @@ import { getAddress, parseAbiItem } from 'viem'
 import type { PoolClient } from 'pg'
 import gridMiningAbi from '../abis/GridMining.json' with { type: 'json' }
 import crownAbi from '../abis/Crown.json' with { type: 'json' }
-import { CONTRACTS } from '../config/contracts.js'
+import { ACTIVE_STACK_KEY, CONTRACTS } from '../config/contracts.js'
 import { env } from '../config/env.js'
 import { publicClient } from '../lib/client.js'
 import { closeProtocolIndexPool, getProtocolIndexPool, initProtocolIndexSchema } from '../lib/protocolIndexDb.js'
@@ -19,7 +19,7 @@ const DEPLOYED_FOR_EVENT = parseAbiItem(
   'event DeployedFor(uint64 indexed roundId, address indexed user, address indexed executor, uint256 amountPerBlock, uint256 blockMask, uint256 totalAmount)'
 )
 const ROUND_SETTLED_EVENT = parseAbiItem(
-  'event RoundSettled(uint64 indexed roundId, uint8 winningBlock, address topMiner, uint256 totalWinnings, uint256 topMinerReward, uint256 lootpotAmount, bool isSplit, uint256 topMinerSeed, uint256 winnersDeployed)'
+  'event RoundSettled(uint64 indexed roundId, uint8 winningBlock, address topMiner, uint256 totalWinnings, uint256 topMinerReward, uint256 lootpotAmount, uint256 ethpotAmount, bool isSplit, uint256 topMinerSeed, uint256 winnersDeployed)'
 )
 const CHECKPOINTED_EVENT = parseAbiItem('event Checkpointed(uint64 indexed roundId, address indexed user, uint256 ethReward, uint256 lootReward)')
 const CLAIMED_LOOT_EVENT = parseAbiItem('event ClaimedLOOT(address indexed user, uint256 minedLoot, uint256 forgedLoot, uint256 fee, uint256 net)')
@@ -82,6 +82,15 @@ const GOLD_CASES_RESOLVED_EVENT = parseAbiItem(
 )
 
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000'
+const ACTIVE_GRID_CONTRACT = getAddress(CONTRACTS.gridMining)
+const ACTIVE_TREASURY_CONTRACT = getAddress(CONTRACTS.treasury)
+const ACTIVE_LOOT_CONTRACT = getAddress(CONTRACTS.loot)
+const ACTIVE_STAKING_CONTRACT = getAddress(CONTRACTS.staking)
+const ACTIVE_LOCKER_CONTRACT = getAddress(CONTRACTS.lootLocker)
+const ACTIVE_LOCKER_REWARDS_CONTRACT = getAddress(CONTRACTS.lockerRewards)
+const ACTIVE_CROWN_CONTRACT = getAddress(CONTRACTS.crown)
+const ACTIVE_AUTOCROWN_CONTRACT = getAddress(CONTRACTS.autoCrown)
+const ACTIVE_CASES_CONTRACT = getAddress(CONTRACTS.goldCases)
 const LOG_BLOCK_RANGE = 10_000n
 const MIN_LOG_BLOCK_RANGE = 1_000n
 const LOG_FETCH_CONCURRENCY = 4
@@ -108,11 +117,6 @@ type CrownRoundStorage = [
   bigint,
   bigint,
   bigint,
-  bigint,
-  bigint,
-  bigint,
-  bigint,
-  Address,
   Address,
   Address,
   boolean,
@@ -126,7 +130,9 @@ const goldCaseTiers = [
   { name: 'Rare', multiplierLabel: '1x', multiplierBps: 10_000n },
   { name: 'Epic', multiplierLabel: '3x', multiplierBps: 30_000n },
   { name: 'Legendary', multiplierLabel: '10x', multiplierBps: 100_000n },
+  { name: '25x', multiplierLabel: '25x', multiplierBps: 250_000n },
   { name: 'Mythic', multiplierLabel: '50x', multiplierBps: 500_000n },
+  { name: '100x', multiplierLabel: '100x', multiplierBps: 1_000_000n },
   { name: 'Jackpot', multiplierLabel: '80% pool', multiplierBps: null },
 ] as const
 
@@ -349,6 +355,14 @@ async function getLastSyncedBlock(client: PoolClient, streamName: string, startB
   return BigInt(result.rows[0].last_synced_block)
 }
 
+function stackStreamName(streamName: string) {
+  return `${streamName}:${ACTIVE_STACK_KEY}`
+}
+
+function activeStackStartBlock() {
+  return env.newStackScanStartBlock > 0n ? env.newStackScanStartBlock : env.scanStartBlock
+}
+
 async function updateSyncState(client: PoolClient, streamName: string, lastSyncedBlock: bigint) {
   await client.query(
     `
@@ -403,9 +417,9 @@ async function shouldRefreshTreasurySnapshot(
 }
 
 async function syncDeployments(client: PoolClient, eventName: 'Deployed' | 'DeployedFor', latestBlock: bigint) {
-  const streamName = eventName === 'Deployed' ? 'deployments_direct' : 'deployments_for'
+  const streamName = stackStreamName(eventName === 'Deployed' ? 'deployments_direct' : 'deployments_for')
   const event = eventName === 'Deployed' ? DEPLOYED_EVENT : DEPLOYED_FOR_EVENT
-  const lastSyncedBlock = await getLastSyncedBlock(client, streamName)
+  const lastSyncedBlock = await getLastSyncedBlock(client, streamName, activeStackStartBlock())
   const fromBlock = lastSyncedBlock + 1n
 
   if (fromBlock > latestBlock) {
@@ -424,12 +438,13 @@ async function syncDeployments(client: PoolClient, eventName: 'Deployed' | 'Depl
     await runWriteQuery(
       `
         insert into protocol_deployments (
-          tx_hash, log_index, event_name, round_id, user_address, executor_address,
+          contract_address, tx_hash, log_index, event_name, round_id, user_address, executor_address,
           amount_per_block, block_mask, total_amount, block_number, block_timestamp
         )
-        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,to_timestamp($11 / 1000.0))
+        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,to_timestamp($12 / 1000.0))
         on conflict (tx_hash, log_index) do update
-        set event_name = excluded.event_name,
+        set contract_address = excluded.contract_address,
+            event_name = excluded.event_name,
             round_id = excluded.round_id,
             user_address = excluded.user_address,
             executor_address = excluded.executor_address,
@@ -440,6 +455,7 @@ async function syncDeployments(client: PoolClient, eventName: 'Deployed' | 'Depl
             block_timestamp = excluded.block_timestamp
       `,
       [
+        ACTIVE_GRID_CONTRACT,
         log.transactionHash,
         log.logIndex,
         eventName,
@@ -460,8 +476,8 @@ async function syncDeployments(client: PoolClient, eventName: 'Deployed' | 'Depl
 }
 
 async function syncRoundSettled(client: PoolClient, latestBlock: bigint) {
-  const streamName = 'rounds'
-  const lastSyncedBlock = await getLastSyncedBlock(client, streamName)
+  const streamName = stackStreamName('rounds')
+  const lastSyncedBlock = await getLastSyncedBlock(client, streamName, activeStackStartBlock())
   const fromBlock = lastSyncedBlock + 1n
 
   if (fromBlock > latestBlock) {
@@ -483,18 +499,18 @@ async function syncRoundSettled(client: PoolClient, latestBlock: bigint) {
       abi: gridMiningAbi,
       functionName: 'rounds',
       args: [roundId],
-    }) as Promise<[bigint, bigint, bigint, bigint, bigint, number, Address, bigint, bigint, bigint, bigint, boolean, bigint]>)
+    }) as Promise<[bigint, bigint, bigint, bigint, bigint, number, Address, bigint, bigint, bigint, bigint, bigint, boolean, bigint]>)
 
     await runWriteQuery(
       `
         insert into protocol_rounds (
-          round_id, start_time, end_time, total_deployed, total_winnings, winners_deployed,
-          winning_block, top_miner, top_miner_reward, lootpot_amount, vrf_request_id,
+          contract_address, round_id, start_time, end_time, total_deployed, total_winnings, winners_deployed,
+          winning_block, top_miner, top_miner_reward, lootpot_amount, ethpot_amount, vrf_request_id,
           top_miner_seed, settled, miner_count, is_split, settled_block_number,
           settled_tx_hash, settled_at, updated_at
         )
-        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,to_timestamp($18 / 1000.0),now())
-        on conflict (round_id) do update
+        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,to_timestamp($20 / 1000.0),now())
+        on conflict (contract_address, round_id) do update
         set start_time = excluded.start_time,
             end_time = excluded.end_time,
             total_deployed = excluded.total_deployed,
@@ -504,6 +520,7 @@ async function syncRoundSettled(client: PoolClient, latestBlock: bigint) {
             top_miner = excluded.top_miner,
             top_miner_reward = excluded.top_miner_reward,
             lootpot_amount = excluded.lootpot_amount,
+            ethpot_amount = excluded.ethpot_amount,
             vrf_request_id = excluded.vrf_request_id,
             top_miner_seed = excluded.top_miner_seed,
             settled = excluded.settled,
@@ -515,6 +532,7 @@ async function syncRoundSettled(client: PoolClient, latestBlock: bigint) {
             updated_at = excluded.updated_at
       `,
       [
+        ACTIVE_GRID_CONTRACT,
         roundId.toString(),
         toBigInt(roundStruct[0]).toString(),
         toBigInt(roundStruct[1]).toString(),
@@ -527,8 +545,9 @@ async function syncRoundSettled(client: PoolClient, latestBlock: bigint) {
         toBigInt(roundStruct[8]).toString(),
         toBigInt(roundStruct[9]).toString(),
         toBigInt(roundStruct[10]).toString(),
-        roundStruct[11],
-        toBigInt(roundStruct[12]).toString(),
+        toBigInt(roundStruct[11]).toString(),
+        roundStruct[12],
+        toBigInt(roundStruct[13]).toString(),
         Boolean(log.args.isSplit ?? false),
         log.blockNumber.toString(),
         log.transactionHash,
@@ -542,8 +561,8 @@ async function syncRoundSettled(client: PoolClient, latestBlock: bigint) {
 }
 
 async function syncCheckpoints(client: PoolClient, latestBlock: bigint) {
-  const streamName = 'checkpoints'
-  const lastSyncedBlock = await getLastSyncedBlock(client, streamName)
+  const streamName = stackStreamName('checkpoints')
+  const lastSyncedBlock = await getLastSyncedBlock(client, streamName, activeStackStartBlock())
   const fromBlock = lastSyncedBlock + 1n
   if (fromBlock > latestBlock) return { streamName, inserted: 0, latestBlock }
 
@@ -559,11 +578,12 @@ async function syncCheckpoints(client: PoolClient, latestBlock: bigint) {
     await runWriteQuery(
       `
         insert into protocol_checkpoints (
-          tx_hash, log_index, round_id, user_address, eth_reward, loot_reward, block_number, block_timestamp
+          contract_address, tx_hash, log_index, round_id, user_address, eth_reward, loot_reward, block_number, block_timestamp
         )
-        values ($1,$2,$3,$4,$5,$6,$7,to_timestamp($8 / 1000.0))
+        values ($1,$2,$3,$4,$5,$6,$7,$8,to_timestamp($9 / 1000.0))
         on conflict (tx_hash, log_index) do update
-        set round_id = excluded.round_id,
+        set contract_address = excluded.contract_address,
+            round_id = excluded.round_id,
             user_address = excluded.user_address,
             eth_reward = excluded.eth_reward,
             loot_reward = excluded.loot_reward,
@@ -571,6 +591,7 @@ async function syncCheckpoints(client: PoolClient, latestBlock: bigint) {
             block_timestamp = excluded.block_timestamp
       `,
       [
+        ACTIVE_GRID_CONTRACT,
         log.transactionHash,
         log.logIndex,
         toBigInt(log.args.roundId).toString(),
@@ -588,8 +609,8 @@ async function syncCheckpoints(client: PoolClient, latestBlock: bigint) {
 }
 
 async function syncClaimedLoot(client: PoolClient, latestBlock: bigint) {
-  const streamName = 'claimed_loot'
-  const lastSyncedBlock = await getLastSyncedBlock(client, streamName)
+  const streamName = stackStreamName('claimed_loot')
+  const lastSyncedBlock = await getLastSyncedBlock(client, streamName, activeStackStartBlock())
   const fromBlock = lastSyncedBlock + 1n
   if (fromBlock > latestBlock) return { streamName, inserted: 0, latestBlock }
 
@@ -605,11 +626,12 @@ async function syncClaimedLoot(client: PoolClient, latestBlock: bigint) {
     await runWriteQuery(
       `
         insert into protocol_claimed_loot (
-          tx_hash, log_index, user_address, mined_loot, forged_loot, fee, net, block_number, block_timestamp
+          contract_address, tx_hash, log_index, user_address, mined_loot, forged_loot, fee, net, block_number, block_timestamp
         )
-        values ($1,$2,$3,$4,$5,$6,$7,$8,to_timestamp($9 / 1000.0))
+        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,to_timestamp($10 / 1000.0))
         on conflict (tx_hash, log_index) do update
-        set user_address = excluded.user_address,
+        set contract_address = excluded.contract_address,
+            user_address = excluded.user_address,
             mined_loot = excluded.mined_loot,
             forged_loot = excluded.forged_loot,
             fee = excluded.fee,
@@ -618,6 +640,7 @@ async function syncClaimedLoot(client: PoolClient, latestBlock: bigint) {
             block_timestamp = excluded.block_timestamp
       `,
       [
+        ACTIVE_GRID_CONTRACT,
         log.transactionHash,
         log.logIndex,
         normalizeAddress(log.args.user, 'claimed loot user'),
@@ -647,21 +670,21 @@ async function upsertCrownRoundSnapshot(
   const round = await withRpcRetries(() => publicClient.readContract({
     address: CONTRACTS.crown,
     abi: crownAbi,
-    functionName: 'rounds',
+    functionName: 'getRound',
     args: [roundId],
   }) as Promise<CrownRoundStorage>)
 
   await runWriteQuery(
     `
       insert into crown_rounds (
-        round_id, start_time, end_time, next_roll_at, total_sold, prize_pool,
+        contract_address, round_id, start_time, end_time, next_roll_at, total_sold, prize_pool,
         acc_dividend_per_chest, holder_count, vrf_request_id, vrf_requested_at,
         winning_roll, current_leader, leader_snapshot, winner, active, settled,
         vrf_pending, activated_block_number, settled_block_number, settled_tx_hash,
         settled_at, updated_at
       )
-      values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,now())
-      on conflict (round_id) do update
+      values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,now())
+      on conflict (contract_address, round_id) do update
       set start_time = excluded.start_time,
           end_time = excluded.end_time,
           next_roll_at = excluded.next_roll_at,
@@ -685,23 +708,24 @@ async function upsertCrownRoundSnapshot(
           updated_at = excluded.updated_at
     `,
     [
+      ACTIVE_CROWN_CONTRACT,
       roundId.toString(),
       toBigInt(round[0]).toString(),
       toBigInt(round[1]).toString(),
       toBigInt(round[2]).toString(),
       toBigInt(round[3]).toString(),
       toBigInt(round[4]).toString(),
+      '0',
+      toBigInt(round[3]).toString(),
+      '0',
+      '0',
       toBigInt(round[5]).toString(),
-      toBigInt(round[6]).toString(),
-      toBigInt(round[7]).toString(),
-      toBigInt(round[8]).toString(),
-      toBigInt(round[9]).toString(),
-      normalizeAddress(round[10]),
-      normalizeAddress(round[11]),
-      normalizeAddress(round[12]),
-      round[13],
-      round[14],
-      round[15],
+      normalizeAddress(round[6]),
+      ZERO_ADDRESS,
+      normalizeAddress(round[7]),
+      round[8],
+      round[9],
+      round[10],
       options?.activatedBlockNumber?.toString() ?? null,
       options?.settledBlockNumber?.toString() ?? null,
       options?.settledTxHash ?? null,
@@ -711,8 +735,8 @@ async function upsertCrownRoundSnapshot(
 }
 
 async function syncCrownRoundActivated(client: PoolClient, latestBlock: bigint) {
-  const streamName = 'crown_round_activated'
-  const lastSyncedBlock = await getLastSyncedBlock(client, streamName, env.crownScanStartBlock)
+  const streamName = stackStreamName('crown_round_activated')
+  const lastSyncedBlock = await getLastSyncedBlock(client, streamName, activeStackStartBlock())
   const fromBlock = lastSyncedBlock + 1n
   if (fromBlock > latestBlock) return { streamName, inserted: 0, latestBlock }
 
@@ -734,8 +758,8 @@ async function syncCrownRoundActivated(client: PoolClient, latestBlock: bigint) 
 }
 
 async function syncCrownPurchases(client: PoolClient, latestBlock: bigint) {
-  const streamName = 'crown_purchases'
-  const lastSyncedBlock = await getLastSyncedBlock(client, streamName, env.crownScanStartBlock)
+  const streamName = stackStreamName('crown_purchases')
+  const lastSyncedBlock = await getLastSyncedBlock(client, streamName, activeStackStartBlock())
   const fromBlock = lastSyncedBlock + 1n
   if (fromBlock > latestBlock) return { streamName, inserted: 0, latestBlock }
 
@@ -754,13 +778,14 @@ async function syncCrownPurchases(client: PoolClient, latestBlock: bigint) {
     await runWriteQuery(
       `
         insert into crown_purchases (
-          tx_hash, log_index, round_id, user_address, price, total_sold_after,
+          contract_address, tx_hash, log_index, round_id, user_address, price, total_sold_after,
           leader, prize_amount, dividend_amount, buyback_amount, lock_amount,
           admin_amount, block_number, block_timestamp
         )
-        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,to_timestamp($14 / 1000.0))
+        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,to_timestamp($15 / 1000.0))
         on conflict (tx_hash, log_index) do update
-        set round_id = excluded.round_id,
+        set contract_address = excluded.contract_address,
+            round_id = excluded.round_id,
             user_address = excluded.user_address,
             price = excluded.price,
             total_sold_after = excluded.total_sold_after,
@@ -774,6 +799,7 @@ async function syncCrownPurchases(client: PoolClient, latestBlock: bigint) {
             block_timestamp = excluded.block_timestamp
       `,
       [
+        ACTIVE_CROWN_CONTRACT,
         log.transactionHash,
         log.logIndex,
         roundId.toString(),
@@ -802,8 +828,8 @@ async function syncCrownPurchases(client: PoolClient, latestBlock: bigint) {
 }
 
 async function syncCrownBatchPurchases(client: PoolClient, latestBlock: bigint) {
-  const streamName = 'crown_batch_purchases'
-  const lastSyncedBlock = await getLastSyncedBlock(client, streamName, env.crownScanStartBlock)
+  const streamName = stackStreamName('crown_batch_purchases')
+  const lastSyncedBlock = await getLastSyncedBlock(client, streamName, activeStackStartBlock())
   const fromBlock = lastSyncedBlock + 1n
   if (fromBlock > latestBlock) return { streamName, inserted: 0, latestBlock }
 
@@ -819,12 +845,13 @@ async function syncCrownBatchPurchases(client: PoolClient, latestBlock: bigint) 
     await runWriteQuery(
       `
         insert into crown_batch_purchases (
-          tx_hash, log_index, round_id, user_address, amount, total_price,
+          contract_address, tx_hash, log_index, round_id, user_address, amount, total_price,
           total_sold_after, leader, block_number, block_timestamp
         )
-        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,to_timestamp($10 / 1000.0))
+        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,to_timestamp($11 / 1000.0))
         on conflict (tx_hash, log_index) do update
-        set round_id = excluded.round_id,
+        set contract_address = excluded.contract_address,
+            round_id = excluded.round_id,
             user_address = excluded.user_address,
             amount = excluded.amount,
             total_price = excluded.total_price,
@@ -834,6 +861,7 @@ async function syncCrownBatchPurchases(client: PoolClient, latestBlock: bigint) 
             block_timestamp = excluded.block_timestamp
       `,
       [
+        ACTIVE_CROWN_CONTRACT,
         log.transactionHash,
         log.logIndex,
         toBigInt(log.args.roundId).toString(),
@@ -853,8 +881,8 @@ async function syncCrownBatchPurchases(client: PoolClient, latestBlock: bigint) 
 }
 
 async function syncCrownRollRequested(client: PoolClient, latestBlock: bigint) {
-  const streamName = 'crown_roll_requested'
-  const lastSyncedBlock = await getLastSyncedBlock(client, streamName, env.crownScanStartBlock)
+  const streamName = stackStreamName('crown_roll_requested')
+  const lastSyncedBlock = await getLastSyncedBlock(client, streamName, activeStackStartBlock())
   const fromBlock = lastSyncedBlock + 1n
   if (fromBlock > latestBlock) return { streamName, inserted: 0, latestBlock }
 
@@ -871,12 +899,13 @@ async function syncCrownRollRequested(client: PoolClient, latestBlock: bigint) {
     await runWriteQuery(
       `
         insert into crown_roll_events (
-          tx_hash, log_index, event_name, round_id, request_id, leader_snapshot,
+          contract_address, tx_hash, log_index, event_name, round_id, request_id, leader_snapshot,
           roll, next_roll_at, block_number, block_timestamp
         )
-        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,to_timestamp($10 / 1000.0))
+        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,to_timestamp($11 / 1000.0))
         on conflict (tx_hash, log_index) do update
-        set event_name = excluded.event_name,
+        set contract_address = excluded.contract_address,
+            event_name = excluded.event_name,
             round_id = excluded.round_id,
             request_id = excluded.request_id,
             leader_snapshot = excluded.leader_snapshot,
@@ -885,6 +914,7 @@ async function syncCrownRollRequested(client: PoolClient, latestBlock: bigint) {
             block_timestamp = excluded.block_timestamp
       `,
       [
+        ACTIVE_CROWN_CONTRACT,
         log.transactionHash,
         log.logIndex,
         'RollRequested',
@@ -905,8 +935,8 @@ async function syncCrownRollRequested(client: PoolClient, latestBlock: bigint) {
 }
 
 async function syncCrownRollResolved(client: PoolClient, latestBlock: bigint) {
-  const streamName = 'crown_roll_resolved'
-  const lastSyncedBlock = await getLastSyncedBlock(client, streamName, env.crownScanStartBlock)
+  const streamName = stackStreamName('crown_roll_resolved')
+  const lastSyncedBlock = await getLastSyncedBlock(client, streamName, activeStackStartBlock())
   const fromBlock = lastSyncedBlock + 1n
   if (fromBlock > latestBlock) return { streamName, inserted: 0, latestBlock }
 
@@ -923,12 +953,13 @@ async function syncCrownRollResolved(client: PoolClient, latestBlock: bigint) {
     await runWriteQuery(
       `
         insert into crown_roll_events (
-          tx_hash, log_index, event_name, round_id, request_id, leader_snapshot,
+          contract_address, tx_hash, log_index, event_name, round_id, request_id, leader_snapshot,
           roll, next_roll_at, block_number, block_timestamp
         )
-        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,to_timestamp($10 / 1000.0))
+        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,to_timestamp($11 / 1000.0))
         on conflict (tx_hash, log_index) do update
-        set event_name = excluded.event_name,
+        set contract_address = excluded.contract_address,
+            event_name = excluded.event_name,
             round_id = excluded.round_id,
             roll = excluded.roll,
             next_roll_at = excluded.next_roll_at,
@@ -936,6 +967,7 @@ async function syncCrownRollResolved(client: PoolClient, latestBlock: bigint) {
             block_timestamp = excluded.block_timestamp
       `,
       [
+        ACTIVE_CROWN_CONTRACT,
         log.transactionHash,
         log.logIndex,
         'RollResolved',
@@ -956,8 +988,8 @@ async function syncCrownRollResolved(client: PoolClient, latestBlock: bigint) {
 }
 
 async function syncCrownRoundSettled(client: PoolClient, latestBlock: bigint) {
-  const streamName = 'crown_round_settled'
-  const lastSyncedBlock = await getLastSyncedBlock(client, streamName, env.crownScanStartBlock)
+  const streamName = stackStreamName('crown_round_settled')
+  const lastSyncedBlock = await getLastSyncedBlock(client, streamName, activeStackStartBlock())
   const fromBlock = lastSyncedBlock + 1n
   if (fromBlock > latestBlock) return { streamName, inserted: 0, latestBlock }
 
@@ -974,18 +1006,20 @@ async function syncCrownRoundSettled(client: PoolClient, latestBlock: bigint) {
     await runWriteQuery(
       `
         insert into crown_roll_events (
-          tx_hash, log_index, event_name, round_id, request_id, leader_snapshot,
+          contract_address, tx_hash, log_index, event_name, round_id, request_id, leader_snapshot,
           roll, next_roll_at, block_number, block_timestamp
         )
-        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,to_timestamp($10 / 1000.0))
+        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,to_timestamp($11 / 1000.0))
         on conflict (tx_hash, log_index) do update
-        set event_name = excluded.event_name,
+        set contract_address = excluded.contract_address,
+            event_name = excluded.event_name,
             round_id = excluded.round_id,
             roll = excluded.roll,
             block_number = excluded.block_number,
             block_timestamp = excluded.block_timestamp
       `,
       [
+        ACTIVE_CROWN_CONTRACT,
         log.transactionHash,
         log.logIndex,
         'RoundSettled',
@@ -1010,9 +1044,9 @@ async function syncCrownRoundSettled(client: PoolClient, latestBlock: bigint) {
 }
 
 async function syncCrownClaims(client: PoolClient, eventName: 'ClaimedDividends' | 'ClaimedPrize', latestBlock: bigint) {
-  const streamName = eventName === 'ClaimedDividends' ? 'crown_claimed_dividends' : 'crown_claimed_prize'
+  const streamName = stackStreamName(eventName === 'ClaimedDividends' ? 'crown_claimed_dividends' : 'crown_claimed_prize')
   const event = eventName === 'ClaimedDividends' ? CROWN_CLAIMED_DIVIDENDS_EVENT : CROWN_CLAIMED_PRIZE_EVENT
-  const lastSyncedBlock = await getLastSyncedBlock(client, streamName, env.crownScanStartBlock)
+  const lastSyncedBlock = await getLastSyncedBlock(client, streamName, activeStackStartBlock())
   const fromBlock = lastSyncedBlock + 1n
   if (fromBlock > latestBlock) return { streamName, inserted: 0, latestBlock }
 
@@ -1028,17 +1062,19 @@ async function syncCrownClaims(client: PoolClient, eventName: 'ClaimedDividends'
     await runWriteQuery(
       `
         insert into crown_claims (
-          tx_hash, log_index, event_name, user_address, amount, block_number, block_timestamp
+          contract_address, tx_hash, log_index, event_name, user_address, amount, block_number, block_timestamp
         )
-        values ($1,$2,$3,$4,$5,$6,to_timestamp($7 / 1000.0))
+        values ($1,$2,$3,$4,$5,$6,$7,to_timestamp($8 / 1000.0))
         on conflict (tx_hash, log_index) do update
-        set event_name = excluded.event_name,
+        set contract_address = excluded.contract_address,
+            event_name = excluded.event_name,
             user_address = excluded.user_address,
             amount = excluded.amount,
             block_number = excluded.block_number,
             block_timestamp = excluded.block_timestamp
       `,
       [
+        ACTIVE_CROWN_CONTRACT,
         log.transactionHash,
         log.logIndex,
         eventName,
@@ -1055,8 +1091,8 @@ async function syncCrownClaims(client: PoolClient, eventName: 'ClaimedDividends'
 }
 
 async function syncAutoCrownConfigUpdated(client: PoolClient, latestBlock: bigint) {
-  const streamName = 'autocrown_config_updated'
-  const lastSyncedBlock = await getLastSyncedBlock(client, streamName, env.crownScanStartBlock)
+  const streamName = stackStreamName('autocrown_config_updated')
+  const lastSyncedBlock = await getLastSyncedBlock(client, streamName, activeStackStartBlock())
   const fromBlock = lastSyncedBlock + 1n
   if (fromBlock > latestBlock) return { streamName, inserted: 0, latestBlock }
 
@@ -1072,13 +1108,13 @@ async function syncAutoCrownConfigUpdated(client: PoolClient, latestBlock: bigin
     await runWriteQuery(
       `
         insert into autocrown_configs (
-          user_address, active, open_new_round, defend_lead, snipe_when_outbid,
+          contract_address, user_address, active, open_new_round, defend_lead, snipe_when_outbid,
           buy_window_seconds, max_buys_per_tick, max_buys_per_round,
           max_build_price, max_battle_price, min_prize_pool, target_chests,
           max_round_spend, total_budget, block_number, tx_hash, updated_at
         )
-        values ($1,true,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,to_timestamp($16 / 1000.0))
-        on conflict (user_address) do update
+        values ($1,$2,true,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,to_timestamp($17 / 1000.0))
+        on conflict (contract_address, user_address) do update
         set active = excluded.active,
             open_new_round = excluded.open_new_round,
             defend_lead = excluded.defend_lead,
@@ -1097,6 +1133,7 @@ async function syncAutoCrownConfigUpdated(client: PoolClient, latestBlock: bigin
             updated_at = excluded.updated_at
       `,
       [
+        ACTIVE_AUTOCROWN_CONTRACT,
         normalizeAddress(log.args.user, 'autocrown config user'),
         Boolean(log.args.openNewRound),
         Boolean(log.args.defendLead),
@@ -1122,8 +1159,8 @@ async function syncAutoCrownConfigUpdated(client: PoolClient, latestBlock: bigin
 }
 
 async function syncAutoCrownDeposits(client: PoolClient, latestBlock: bigint) {
-  const streamName = 'autocrown_deposits'
-  const lastSyncedBlock = await getLastSyncedBlock(client, streamName, env.crownScanStartBlock)
+  const streamName = stackStreamName('autocrown_deposits')
+  const lastSyncedBlock = await getLastSyncedBlock(client, streamName, activeStackStartBlock())
   const fromBlock = lastSyncedBlock + 1n
   if (fromBlock > latestBlock) return { streamName, inserted: 0, latestBlock }
 
@@ -1139,17 +1176,19 @@ async function syncAutoCrownDeposits(client: PoolClient, latestBlock: bigint) {
     await runWriteQuery(
       `
         insert into autocrown_deposits (
-          tx_hash, log_index, user_address, amount, new_balance, block_number, block_timestamp
+          contract_address, tx_hash, log_index, user_address, amount, new_balance, block_number, block_timestamp
         )
-        values ($1,$2,$3,$4,$5,$6,to_timestamp($7 / 1000.0))
+        values ($1,$2,$3,$4,$5,$6,$7,to_timestamp($8 / 1000.0))
         on conflict (tx_hash, log_index) do update
-        set user_address = excluded.user_address,
+        set contract_address = excluded.contract_address,
+            user_address = excluded.user_address,
             amount = excluded.amount,
             new_balance = excluded.new_balance,
             block_number = excluded.block_number,
             block_timestamp = excluded.block_timestamp
       `,
       [
+        ACTIVE_AUTOCROWN_CONTRACT,
         log.transactionHash,
         log.logIndex,
         normalizeAddress(log.args.user, 'autocrown deposit user'),
@@ -1167,9 +1206,9 @@ async function syncAutoCrownDeposits(client: PoolClient, latestBlock: bigint) {
 
 async function syncAutoCrownExecutedFor(client: PoolClient, eventName: 'ExecutedFor' | 'BatchExecutedFor', latestBlock: bigint) {
   const isBatch = eventName === 'BatchExecutedFor'
-  const streamName = isBatch ? 'autocrown_batch_executed_for' : 'autocrown_executed_for'
+  const streamName = stackStreamName(isBatch ? 'autocrown_batch_executed_for' : 'autocrown_executed_for')
   const event = isBatch ? AUTOCROWN_BATCH_EXECUTED_FOR_EVENT : AUTOCROWN_EXECUTED_FOR_EVENT
-  const lastSyncedBlock = await getLastSyncedBlock(client, streamName, env.crownScanStartBlock)
+  const lastSyncedBlock = await getLastSyncedBlock(client, streamName, activeStackStartBlock())
   const fromBlock = lastSyncedBlock + 1n
   if (fromBlock > latestBlock) return { streamName, inserted: 0, latestBlock }
 
@@ -1186,13 +1225,14 @@ async function syncAutoCrownExecutedFor(client: PoolClient, eventName: 'Executed
     await runWriteQuery(
       `
         insert into autocrown_executions (
-          tx_hash, log_index, event_name, user_address, round_id, amount,
+          contract_address, tx_hash, log_index, event_name, user_address, round_id, amount,
           total_price, executor_fee, battle_phase, deposit_balance,
           block_number, block_timestamp
         )
-        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,to_timestamp($12 / 1000.0))
+        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,to_timestamp($13 / 1000.0))
         on conflict (tx_hash, log_index) do update
-        set event_name = excluded.event_name,
+        set contract_address = excluded.contract_address,
+            event_name = excluded.event_name,
             user_address = excluded.user_address,
             round_id = excluded.round_id,
             amount = excluded.amount,
@@ -1204,6 +1244,7 @@ async function syncAutoCrownExecutedFor(client: PoolClient, eventName: 'Executed
             block_timestamp = excluded.block_timestamp
       `,
       [
+        ACTIVE_AUTOCROWN_CONTRACT,
         log.transactionHash,
         log.logIndex,
         eventName,
@@ -1225,8 +1266,8 @@ async function syncAutoCrownExecutedFor(client: PoolClient, eventName: 'Executed
 }
 
 async function syncAutoCrownStops(client: PoolClient, latestBlock: bigint) {
-  const streamName = 'autocrown_stops'
-  const lastSyncedBlock = await getLastSyncedBlock(client, streamName, env.crownScanStartBlock)
+  const streamName = stackStreamName('autocrown_stops')
+  const lastSyncedBlock = await getLastSyncedBlock(client, streamName, activeStackStartBlock())
   const fromBlock = lastSyncedBlock + 1n
   if (fromBlock > latestBlock) return { streamName, inserted: 0, latestBlock }
 
@@ -1243,16 +1284,18 @@ async function syncAutoCrownStops(client: PoolClient, latestBlock: bigint) {
     await runWriteQuery(
       `
         insert into autocrown_stops (
-          tx_hash, log_index, user_address, refunded, block_number, block_timestamp
+          contract_address, tx_hash, log_index, user_address, refunded, block_number, block_timestamp
         )
-        values ($1,$2,$3,$4,$5,to_timestamp($6 / 1000.0))
+        values ($1,$2,$3,$4,$5,$6,to_timestamp($7 / 1000.0))
         on conflict (tx_hash, log_index) do update
-        set user_address = excluded.user_address,
+        set contract_address = excluded.contract_address,
+            user_address = excluded.user_address,
             refunded = excluded.refunded,
             block_number = excluded.block_number,
             block_timestamp = excluded.block_timestamp
       `,
       [
+        ACTIVE_AUTOCROWN_CONTRACT,
         log.transactionHash,
         log.logIndex,
         user,
@@ -1269,8 +1312,9 @@ async function syncAutoCrownStops(client: PoolClient, latestBlock: bigint) {
             tx_hash = $3,
             updated_at = to_timestamp($4 / 1000.0)
         where user_address = $1
+          and contract_address = $5
       `,
-      [user, log.blockNumber.toString(), log.transactionHash, timestampMs]
+      [user, log.blockNumber.toString(), log.transactionHash, timestampMs, ACTIVE_AUTOCROWN_CONTRACT]
     )
   })
 
@@ -1279,8 +1323,8 @@ async function syncAutoCrownStops(client: PoolClient, latestBlock: bigint) {
 }
 
 async function syncGoldCaseOpens(client: PoolClient, latestBlock: bigint) {
-  const streamName = 'gold_case_opens'
-  const lastSyncedBlock = await getLastSyncedBlock(client, streamName, env.goldCasesScanStartBlock)
+  const streamName = stackStreamName('gold_case_opens')
+  const lastSyncedBlock = await getLastSyncedBlock(client, streamName, activeStackStartBlock())
   const fromBlock = lastSyncedBlock + 1n
   if (fromBlock > latestBlock) return { streamName, inserted: 0, latestBlock }
 
@@ -1296,12 +1340,13 @@ async function syncGoldCaseOpens(client: PoolClient, latestBlock: bigint) {
     await runWriteQuery(
       `
         insert into gold_case_opens (
-          tx_hash, log_index, request_id, player_address, chest_count,
+          contract_address, tx_hash, log_index, request_id, player_address, chest_count,
           chest_price, total_cost, paid_from_claimable, block_number, block_timestamp
         )
-        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,to_timestamp($10 / 1000.0))
+        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,to_timestamp($11 / 1000.0))
         on conflict (tx_hash, log_index) do update
-        set request_id = excluded.request_id,
+        set contract_address = excluded.contract_address,
+            request_id = excluded.request_id,
             player_address = excluded.player_address,
             chest_count = excluded.chest_count,
             chest_price = excluded.chest_price,
@@ -1311,6 +1356,7 @@ async function syncGoldCaseOpens(client: PoolClient, latestBlock: bigint) {
             block_timestamp = excluded.block_timestamp
       `,
       [
+        ACTIVE_CASES_CONTRACT,
         log.transactionHash,
         log.logIndex,
         toBigInt(log.args.requestId).toString(),
@@ -1330,8 +1376,8 @@ async function syncGoldCaseOpens(client: PoolClient, latestBlock: bigint) {
 }
 
 async function syncGoldCaseResolutions(client: PoolClient, latestBlock: bigint) {
-  const streamName = 'gold_case_resolutions'
-  const lastSyncedBlock = await getLastSyncedBlock(client, streamName, env.goldCasesScanStartBlock)
+  const streamName = stackStreamName('gold_case_resolutions')
+  const lastSyncedBlock = await getLastSyncedBlock(client, streamName, activeStackStartBlock())
   const fromBlock = lastSyncedBlock + 1n
   if (fromBlock > latestBlock) return { streamName, inserted: 0, latestBlock }
 
@@ -1355,13 +1401,14 @@ async function syncGoldCaseResolutions(client: PoolClient, latestBlock: bigint) 
     await runWriteQuery(
       `
         insert into gold_case_resolutions (
-          tx_hash, log_index, request_id, player_address, chest_count,
+          contract_address, tx_hash, log_index, request_id, player_address, chest_count,
           total_payout, jackpot_payout, tiers_json, payouts_json,
           block_number, block_timestamp
         )
-        values ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10,to_timestamp($11 / 1000.0))
+        values ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb,$11,to_timestamp($12 / 1000.0))
         on conflict (tx_hash, log_index) do update
-        set request_id = excluded.request_id,
+        set contract_address = excluded.contract_address,
+            request_id = excluded.request_id,
             player_address = excluded.player_address,
             chest_count = excluded.chest_count,
             total_payout = excluded.total_payout,
@@ -1372,6 +1419,7 @@ async function syncGoldCaseResolutions(client: PoolClient, latestBlock: bigint) 
             block_timestamp = excluded.block_timestamp
       `,
       [
+        ACTIVE_CASES_CONTRACT,
         log.transactionHash,
         log.logIndex,
         requestId.toString(),
@@ -1392,12 +1440,12 @@ async function syncGoldCaseResolutions(client: PoolClient, latestBlock: bigint) 
       await runWriteQuery(
         `
           insert into gold_case_results (
-            request_id, chest_index, tx_hash, log_index, player_address, tier,
+            contract_address, request_id, chest_index, tx_hash, log_index, player_address, tier,
             tier_name, multiplier_label, multiplier_bps, payout, total_payout,
             jackpot_payout, chest_count, block_number, block_timestamp
           )
-          values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,to_timestamp($15 / 1000.0))
-          on conflict (request_id, chest_index) do update
+          values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,to_timestamp($16 / 1000.0))
+          on conflict (contract_address, request_id, chest_index) do update
           set tx_hash = excluded.tx_hash,
               log_index = excluded.log_index,
               player_address = excluded.player_address,
@@ -1413,6 +1461,7 @@ async function syncGoldCaseResolutions(client: PoolClient, latestBlock: bigint) 
               block_timestamp = excluded.block_timestamp
         `,
         [
+          ACTIVE_CASES_CONTRACT,
           requestId.toString(),
           chestIndex,
           log.transactionHash,
@@ -1439,8 +1488,8 @@ async function syncGoldCaseResolutions(client: PoolClient, latestBlock: bigint) 
 }
 
 async function syncVaultEvents(client: PoolClient, latestBlock: bigint) {
-  const streamName = 'treasury_vault'
-  const lastSyncedBlock = await getLastSyncedBlock(client, streamName)
+  const streamName = stackStreamName('treasury_vault')
+  const lastSyncedBlock = await getLastSyncedBlock(client, streamName, activeStackStartBlock())
   const fromBlock = lastSyncedBlock + 1n
   if (fromBlock > latestBlock) return { streamName, inserted: 0, latestBlock }
 
@@ -1456,16 +1505,18 @@ async function syncVaultEvents(client: PoolClient, latestBlock: bigint) {
     await runWriteQuery(
       `
         insert into protocol_treasury_vault_events (
-          tx_hash, log_index, amount, total_vaulted, block_number, block_timestamp
+          contract_address, tx_hash, log_index, amount, total_vaulted, block_number, block_timestamp
         )
-        values ($1,$2,$3,$4,$5,to_timestamp($6 / 1000.0))
+        values ($1,$2,$3,$4,$5,$6,to_timestamp($7 / 1000.0))
         on conflict (tx_hash, log_index) do update
-        set amount = excluded.amount,
+        set contract_address = excluded.contract_address,
+            amount = excluded.amount,
             total_vaulted = excluded.total_vaulted,
             block_number = excluded.block_number,
             block_timestamp = excluded.block_timestamp
       `,
       [
+        ACTIVE_TREASURY_CONTRACT,
         log.transactionHash,
         log.logIndex,
         toBigInt(log.args.amount).toString(),
@@ -1481,8 +1532,8 @@ async function syncVaultEvents(client: PoolClient, latestBlock: bigint) {
 }
 
 async function syncBuybacks(client: PoolClient, latestBlock: bigint) {
-  const streamName = 'treasury_buybacks'
-  const lastSyncedBlock = await getLastSyncedBlock(client, streamName)
+  const streamName = stackStreamName('treasury_buybacks')
+  const lastSyncedBlock = await getLastSyncedBlock(client, streamName, activeStackStartBlock())
   const fromBlock = lastSyncedBlock + 1n
   if (fromBlock > latestBlock) return { streamName, inserted: 0, latestBlock }
 
@@ -1498,11 +1549,12 @@ async function syncBuybacks(client: PoolClient, latestBlock: bigint) {
     await runWriteQuery(
       `
         insert into protocol_treasury_buybacks (
-          tx_hash, log_index, eth_spent, loot_received, loot_burned, loot_to_stakers, block_number, block_timestamp
+          contract_address, tx_hash, log_index, eth_spent, loot_received, loot_burned, loot_to_stakers, block_number, block_timestamp
         )
-        values ($1,$2,$3,$4,$5,$6,$7,to_timestamp($8 / 1000.0))
+        values ($1,$2,$3,$4,$5,$6,$7,$8,to_timestamp($9 / 1000.0))
         on conflict (tx_hash, log_index) do update
-        set eth_spent = excluded.eth_spent,
+        set contract_address = excluded.contract_address,
+            eth_spent = excluded.eth_spent,
             loot_received = excluded.loot_received,
             loot_burned = excluded.loot_burned,
             loot_to_stakers = excluded.loot_to_stakers,
@@ -1510,6 +1562,7 @@ async function syncBuybacks(client: PoolClient, latestBlock: bigint) {
             block_timestamp = excluded.block_timestamp
       `,
       [
+        ACTIVE_TREASURY_CONTRACT,
         log.transactionHash,
         log.logIndex,
         toBigInt(log.args.ethSpent).toString(),
@@ -1527,8 +1580,8 @@ async function syncBuybacks(client: PoolClient, latestBlock: bigint) {
 }
 
 async function syncDirectBurns(client: PoolClient, latestBlock: bigint) {
-  const streamName = 'direct_burns'
-  const lastSyncedBlock = await getLastSyncedBlock(client, streamName)
+  const streamName = stackStreamName('direct_burns')
+  const lastSyncedBlock = await getLastSyncedBlock(client, streamName, activeStackStartBlock())
   const fromBlock = lastSyncedBlock + 1n
   if (fromBlock > latestBlock) return { streamName, inserted: 0, latestBlock }
 
@@ -1545,16 +1598,18 @@ async function syncDirectBurns(client: PoolClient, latestBlock: bigint) {
     await runWriteQuery(
       `
         insert into protocol_direct_burns (
-          tx_hash, log_index, from_address, value, block_number, block_timestamp
+          contract_address, tx_hash, log_index, from_address, value, block_number, block_timestamp
         )
-        values ($1,$2,$3,$4,$5,to_timestamp($6 / 1000.0))
+        values ($1,$2,$3,$4,$5,$6,to_timestamp($7 / 1000.0))
         on conflict (tx_hash, log_index) do update
-        set from_address = excluded.from_address,
+        set contract_address = excluded.contract_address,
+            from_address = excluded.from_address,
             value = excluded.value,
             block_number = excluded.block_number,
             block_timestamp = excluded.block_timestamp
       `,
       [
+        ACTIVE_LOOT_CONTRACT,
         log.transactionHash,
         log.logIndex,
         normalizeAddress(log.args.from, 'direct burn sender'),
@@ -1570,8 +1625,8 @@ async function syncDirectBurns(client: PoolClient, latestBlock: bigint) {
 }
 
 async function syncStakeDeposits(client: PoolClient, latestBlock: bigint) {
-  const streamName = 'staking_deposits'
-  const lastSyncedBlock = await getLastSyncedBlock(client, streamName)
+  const streamName = stackStreamName('staking_deposits')
+  const lastSyncedBlock = await getLastSyncedBlock(client, streamName, activeStackStartBlock())
   const fromBlock = lastSyncedBlock + 1n
   if (fromBlock > latestBlock) return { streamName, inserted: 0, latestBlock }
 
@@ -1587,17 +1642,19 @@ async function syncStakeDeposits(client: PoolClient, latestBlock: bigint) {
     await runWriteQuery(
       `
         insert into protocol_staking_deposits (
-          tx_hash, log_index, user_address, amount, new_balance, block_number, block_timestamp
+          contract_address, tx_hash, log_index, user_address, amount, new_balance, block_number, block_timestamp
         )
-        values ($1,$2,$3,$4,$5,$6,to_timestamp($7 / 1000.0))
+        values ($1,$2,$3,$4,$5,$6,$7,to_timestamp($8 / 1000.0))
         on conflict (tx_hash, log_index) do update
-        set user_address = excluded.user_address,
+        set contract_address = excluded.contract_address,
+            user_address = excluded.user_address,
             amount = excluded.amount,
             new_balance = excluded.new_balance,
             block_number = excluded.block_number,
             block_timestamp = excluded.block_timestamp
       `,
       [
+        ACTIVE_STAKING_CONTRACT,
         log.transactionHash,
         log.logIndex,
         normalizeAddress(log.args.user, 'staking deposit user'),
@@ -1614,8 +1671,8 @@ async function syncStakeDeposits(client: PoolClient, latestBlock: bigint) {
 }
 
 async function syncStakeWithdrawals(client: PoolClient, latestBlock: bigint) {
-  const streamName = 'staking_withdrawals'
-  const lastSyncedBlock = await getLastSyncedBlock(client, streamName)
+  const streamName = stackStreamName('staking_withdrawals')
+  const lastSyncedBlock = await getLastSyncedBlock(client, streamName, activeStackStartBlock())
   const fromBlock = lastSyncedBlock + 1n
   if (fromBlock > latestBlock) return { streamName, inserted: 0, latestBlock }
 
@@ -1631,17 +1688,19 @@ async function syncStakeWithdrawals(client: PoolClient, latestBlock: bigint) {
     await runWriteQuery(
       `
         insert into protocol_staking_withdrawals (
-          tx_hash, log_index, user_address, amount, new_balance, block_number, block_timestamp
+          contract_address, tx_hash, log_index, user_address, amount, new_balance, block_number, block_timestamp
         )
-        values ($1,$2,$3,$4,$5,$6,to_timestamp($7 / 1000.0))
+        values ($1,$2,$3,$4,$5,$6,$7,to_timestamp($8 / 1000.0))
         on conflict (tx_hash, log_index) do update
-        set user_address = excluded.user_address,
+        set contract_address = excluded.contract_address,
+            user_address = excluded.user_address,
             amount = excluded.amount,
             new_balance = excluded.new_balance,
             block_number = excluded.block_number,
             block_timestamp = excluded.block_timestamp
       `,
       [
+        ACTIVE_STAKING_CONTRACT,
         log.transactionHash,
         log.logIndex,
         normalizeAddress(log.args.user, 'staking withdrawal user'),
@@ -1658,8 +1717,8 @@ async function syncStakeWithdrawals(client: PoolClient, latestBlock: bigint) {
 }
 
 async function syncStakeCompounds(client: PoolClient, latestBlock: bigint) {
-  const streamName = 'staking_compounds'
-  const lastSyncedBlock = await getLastSyncedBlock(client, streamName)
+  const streamName = stackStreamName('staking_compounds')
+  const lastSyncedBlock = await getLastSyncedBlock(client, streamName, activeStackStartBlock())
   const fromBlock = lastSyncedBlock + 1n
   if (fromBlock > latestBlock) return { streamName, inserted: 0, latestBlock }
 
@@ -1675,11 +1734,12 @@ async function syncStakeCompounds(client: PoolClient, latestBlock: bigint) {
     await runWriteQuery(
       `
         insert into protocol_staking_compounds (
-          tx_hash, log_index, user_address, compounder_address, amount, fee, block_number, block_timestamp
+          contract_address, tx_hash, log_index, user_address, compounder_address, amount, fee, block_number, block_timestamp
         )
-        values ($1,$2,$3,$4,$5,$6,$7,to_timestamp($8 / 1000.0))
+        values ($1,$2,$3,$4,$5,$6,$7,$8,to_timestamp($9 / 1000.0))
         on conflict (tx_hash, log_index) do update
-        set user_address = excluded.user_address,
+        set contract_address = excluded.contract_address,
+            user_address = excluded.user_address,
             compounder_address = excluded.compounder_address,
             amount = excluded.amount,
             fee = excluded.fee,
@@ -1687,6 +1747,7 @@ async function syncStakeCompounds(client: PoolClient, latestBlock: bigint) {
             block_timestamp = excluded.block_timestamp
       `,
       [
+        ACTIVE_STAKING_CONTRACT,
         log.transactionHash,
         log.logIndex,
         normalizeAddress(log.args.user, 'staking compound user'),
@@ -1704,8 +1765,8 @@ async function syncStakeCompounds(client: PoolClient, latestBlock: bigint) {
 }
 
 async function syncYieldDistributions(client: PoolClient, latestBlock: bigint) {
-  const streamName = 'staking_yield_distributions'
-  const lastSyncedBlock = await getLastSyncedBlock(client, streamName)
+  const streamName = stackStreamName('staking_yield_distributions')
+  const lastSyncedBlock = await getLastSyncedBlock(client, streamName, activeStackStartBlock())
   const fromBlock = lastSyncedBlock + 1n
   if (fromBlock > latestBlock) return { streamName, inserted: 0, latestBlock }
 
@@ -1721,16 +1782,18 @@ async function syncYieldDistributions(client: PoolClient, latestBlock: bigint) {
     await runWriteQuery(
       `
         insert into protocol_staking_yield_distributions (
-          tx_hash, log_index, amount, new_acc_yield_per_share, block_number, block_timestamp
+          contract_address, tx_hash, log_index, amount, new_acc_yield_per_share, block_number, block_timestamp
         )
-        values ($1,$2,$3,$4,$5,to_timestamp($6 / 1000.0))
+        values ($1,$2,$3,$4,$5,$6,to_timestamp($7 / 1000.0))
         on conflict (tx_hash, log_index) do update
-        set amount = excluded.amount,
+        set contract_address = excluded.contract_address,
+            amount = excluded.amount,
             new_acc_yield_per_share = excluded.new_acc_yield_per_share,
             block_number = excluded.block_number,
             block_timestamp = excluded.block_timestamp
       `,
       [
+        ACTIVE_STAKING_CONTRACT,
         log.transactionHash,
         log.logIndex,
         toBigInt(log.args.amount).toString(),
@@ -1746,8 +1809,8 @@ async function syncYieldDistributions(client: PoolClient, latestBlock: bigint) {
 }
 
 async function syncLockRewards(client: PoolClient, latestBlock: bigint) {
-  const streamName = 'lock_reward_notified'
-  const lastSyncedBlock = await getLastSyncedBlock(client, streamName)
+  const streamName = stackStreamName('lock_reward_notified')
+  const lastSyncedBlock = await getLastSyncedBlock(client, streamName, activeStackStartBlock())
   const fromBlock = lastSyncedBlock + 1n
   if (fromBlock > latestBlock) return { streamName, inserted: 0, latestBlock }
 
@@ -1763,12 +1826,13 @@ async function syncLockRewards(client: PoolClient, latestBlock: bigint) {
     await runWriteQuery(
       `
         insert into protocol_lock_reward_notified (
-          tx_hash, log_index, amount, distributed_amount, unallocated_amount,
+          contract_address, tx_hash, log_index, amount, distributed_amount, unallocated_amount,
           acc_reward_per_weight, block_number, block_timestamp
         )
-        values ($1,$2,$3,$4,$5,$6,$7,to_timestamp($8 / 1000.0))
+        values ($1,$2,$3,$4,$5,$6,$7,$8,to_timestamp($9 / 1000.0))
         on conflict (tx_hash, log_index) do update
-        set amount = excluded.amount,
+        set contract_address = excluded.contract_address,
+            amount = excluded.amount,
             distributed_amount = excluded.distributed_amount,
             unallocated_amount = excluded.unallocated_amount,
             acc_reward_per_weight = excluded.acc_reward_per_weight,
@@ -1776,6 +1840,7 @@ async function syncLockRewards(client: PoolClient, latestBlock: bigint) {
             block_timestamp = excluded.block_timestamp
       `,
       [
+        ACTIVE_LOCKER_REWARDS_CONTRACT,
         log.transactionHash,
         log.logIndex,
         toBigInt(log.args.amount).toString(),
@@ -1832,12 +1897,13 @@ async function syncLockerState(client: PoolClient, streamName: string, logs: Loc
     await runWriteQuery(
       `
         insert into protocol_locker_events (
-          tx_hash, log_index, event_name, user_address, lock_id, amount_delta,
+          contract_address, tx_hash, log_index, event_name, user_address, lock_id, amount_delta,
           unlock_time, duration_id, new_user_weight, new_total_weight, block_number, block_timestamp
         )
-        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,to_timestamp($12 / 1000.0))
+        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,to_timestamp($13 / 1000.0))
         on conflict (tx_hash, log_index) do update
-        set event_name = excluded.event_name,
+        set contract_address = excluded.contract_address,
+            event_name = excluded.event_name,
             user_address = excluded.user_address,
             lock_id = excluded.lock_id,
             amount_delta = excluded.amount_delta,
@@ -1849,6 +1915,7 @@ async function syncLockerState(client: PoolClient, streamName: string, logs: Loc
             block_timestamp = excluded.block_timestamp
       `,
       [
+        ACTIVE_LOCKER_CONTRACT,
         log.transactionHash,
         log.logIndex,
         log.eventName,
@@ -1874,9 +1941,10 @@ async function syncLockerStateEvent(
   event: typeof LOCKED_EVENT | typeof ADDED_TO_LOCK_EVENT | typeof EXTENDED_LOCK_EVENT | typeof UNLOCKED_EVENT,
   latestBlock: bigint
 ) {
-  const lastSyncedBlock = await getLastSyncedBlock(client, streamName)
+  const indexedStreamName = stackStreamName(streamName)
+  const lastSyncedBlock = await getLastSyncedBlock(client, indexedStreamName, activeStackStartBlock())
   const fromBlock = lastSyncedBlock + 1n
-  if (fromBlock > latestBlock) return { streamName, inserted: 0, latestBlock }
+  if (fromBlock > latestBlock) return { streamName: indexedStreamName, inserted: 0, latestBlock }
 
   const logs = await getLogsPaged({
     address: CONTRACTS.lootLocker,
@@ -1885,8 +1953,8 @@ async function syncLockerStateEvent(
     toBlock: latestBlock,
   })
 
-  const result = await syncLockerState(client, streamName, logs as LockerStateLog[])
-  await updateSyncState(client, streamName, latestBlock)
+  const result = await syncLockerState(client, indexedStreamName, logs as LockerStateLog[])
+  await updateSyncState(client, indexedStreamName, latestBlock)
   return { ...result, latestBlock }
 }
 

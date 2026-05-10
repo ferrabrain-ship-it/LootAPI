@@ -6,6 +6,8 @@ import { hasProtocolIndexDatabase, getProtocolIndexPool } from '../lib/protocolI
 import { publicClient } from '../lib/client.js'
 
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000' as Address
+const ACTIVE_CROWN_CONTRACT = getAddress(CONTRACTS.crown)
+const ACTIVE_LOOT_CONTRACT = getAddress(CONTRACTS.loot)
 const CROWN_CACHE_TTL_MS = 2_500
 const CROWN_HISTORY_CACHE_TTL_MS = 10_000
 const MAX_LIVE_HOLDER_SCAN = 250
@@ -31,11 +33,6 @@ type RoundStorageInfo = readonly [
   bigint,
   bigint,
   bigint,
-  bigint,
-  bigint,
-  bigint,
-  bigint,
-  Address,
   Address,
   Address,
   boolean,
@@ -196,7 +193,7 @@ async function readRoundStorage(roundId: bigint) {
   return publicClient.readContract({
     address: CONTRACTS.crown,
     abi: crownAbi,
-    functionName: 'rounds',
+    functionName: 'getRound',
     args: [roundId],
   }) as Promise<RoundStorageInfo>
 }
@@ -269,14 +266,14 @@ function mapRoundStorage(roundId: bigint, round: RoundStorageInfo) {
     totalSold: round[3].toString(),
     prizePool: round[4].toString(),
     prizePoolFormatted: ethFixed(round[4], 6),
-    holderCount: round[6].toString(),
-    winningRoll: round[9].toString(),
-    currentLeader: round[10],
-    leaderSnapshot: round[11],
-    winner: round[12],
-    active: round[13],
-    settled: round[14],
-    vrfPending: round[15],
+    holderCount: round[3].toString(),
+    winningRoll: round[5].toString(),
+    currentLeader: round[6],
+    leaderSnapshot: ZERO_ADDRESS,
+    winner: round[7],
+    active: round[8],
+    settled: round[9],
+    vrfPending: round[10],
   }
 }
 
@@ -311,10 +308,11 @@ async function queryIndexedRound(roundId: bigint) {
     `
       select *
       from crown_rounds
-      where round_id = $1
+      where contract_address = $1
+        and round_id = $2
       limit 1
     `,
-    [roundId.toString()]
+    [ACTIVE_CROWN_CONTRACT, roundId.toString()]
   )
   return result.rows[0] ? mapRoundRow(result.rows[0]) : null
 }
@@ -329,10 +327,11 @@ async function queryIndexedRounds(page: number, limit: number) {
     `
       select *
       from crown_rounds
+      where contract_address = $3
       order by round_id desc
       limit $1 offset $2
     `,
-    [safeLimit, offset]
+    [safeLimit, offset, ACTIVE_CROWN_CONTRACT]
   )
   if (result.rows.length === 0) return null
   return {
@@ -351,12 +350,13 @@ async function queryIndexedHolders(roundId: bigint, limit: number) {
     `
       select user_address, count(*)::text as chests, coalesce(sum(price), 0)::text as spent
       from crown_purchases
-      where round_id = $1
+      where contract_address = $1
+        and round_id = $2
       group by user_address
       order by count(*) desc, coalesce(sum(price), 0) desc
-      limit $2
+      limit $3
     `,
-    [roundId.toString(), safeLimit]
+    [ACTIVE_CROWN_CONTRACT, roundId.toString(), safeLimit]
   )
 
   if (result.rows.length === 0) return null
@@ -386,7 +386,7 @@ async function queryIndexedHolders(roundId: bigint, limit: number) {
 async function getLiveHolders(roundId: bigint, limit: number) {
   const safeLimit = clampLimit(limit, 10, 100)
   const round = await readRoundStorage(roundId)
-  const holderCount = Number(round[6])
+  const holderCount = Number(round[3])
   const scanCount = Math.min(holderCount, MAX_LIVE_HOLDER_SCAN)
 
   const addresses = await Promise.all(Array.from({ length: scanCount }, (_, index) => (
@@ -549,17 +549,19 @@ export async function getCrownActivity(roundIdInput?: string | number | bigint, 
       ? `
           select *
           from crown_purchases
-          where round_id = $1
+          where contract_address = $1
+            and round_id = $2
           order by block_number desc, log_index desc
-          limit $2
+          limit $3
         `
       : `
           select *
           from crown_purchases
+          where contract_address = $1
           order by block_number desc, log_index desc
-          limit $1
+          limit $2
         `,
-    roundId ? [roundId.toString(), safeLimit] : [safeLimit]
+    roundId ? [ACTIVE_CROWN_CONTRACT, roundId.toString(), safeLimit] : [ACTIVE_CROWN_CONTRACT, safeLimit]
   )
 
   return {
@@ -624,6 +626,7 @@ export async function getCrownStats(limit = 10) {
                 coalesce(sum(prize_pool), 0)::text as prize_paid
               from crown_rounds
               where settled = true
+                and contract_address = $2
                 and lower(winner) <> lower($1)
             ),
             fee_totals as (
@@ -634,30 +637,33 @@ export async function getCrownStats(limit = 10) {
                 coalesce(sum(admin_amount), 0)::text as admin_fees,
                 coalesce(sum(dividend_amount), 0)::text as dividend_fees
               from crown_purchases
+              where contract_address = $2
             )
             select *
             from round_totals, fee_totals
           `,
-          [ZERO_ADDRESS]
+          [ZERO_ADDRESS, ACTIVE_CROWN_CONTRACT]
         ),
         pool.query<CrownBurnRow>(
           `
             select coalesce(sum(value), 0)::text as loot_burned
             from protocol_direct_burns
-            where lower(from_address) = lower($1)
+            where contract_address = $1
+              and lower(from_address) = lower($2)
           `,
-          [vaults.buybackVault]
+          [ACTIVE_LOOT_CONTRACT, vaults.buybackVault]
         ),
         pool.query<CrownRoundRow>(
           `
             select *
             from crown_rounds
             where settled = true
+              and contract_address = $2
               and lower(winner) <> lower($1)
             order by round_id desc
-            limit $2
+            limit $3
           `,
-          [ZERO_ADDRESS, safeLimit]
+          [ZERO_ADDRESS, ACTIVE_CROWN_CONTRACT, safeLimit]
         ),
       ])
 

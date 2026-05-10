@@ -1,7 +1,9 @@
 import { formatUnits, getAddress, type Address } from 'viem'
+import { CONTRACTS } from '../config/contracts.js'
 import { getProtocolIndexPool, hasProtocolIndexDatabase } from '../lib/protocolIndexDb.js'
 
 const GOLD_DECIMALS = 18
+const ACTIVE_CASES_CONTRACT = getAddress(CONTRACTS.goldCases)
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000' as Address
 
 type GoldCaseBestWinRow = {
@@ -48,7 +50,7 @@ type GoldCaseStatsRow = {
   best_tier: number | null
 }
 
-const tierLabels = ['Empty', 'Common', 'Rare', 'Epic', 'Legendary', 'Mythic', 'Jackpot']
+const tierLabels = ['Empty', 'Common', 'Rare', 'Epic', 'Legendary', '25x', 'Mythic', '100x', 'Jackpot']
 
 function toBigInt(value: string | number | bigint | null | undefined) {
   if (value == null) return 0n
@@ -147,11 +149,12 @@ export async function getGoldCaseBestWins(limit = 10) {
     `
       select *
       from gold_case_results
-      where tier > 0
+      where contract_address = $1
+        and tier > 0
       order by tier desc, payout desc, block_number desc, log_index desc, chest_index asc
-      limit $1
+      limit $2
     `,
-    [safeLimit],
+    [ACTIVE_CASES_CONTRACT, safeLimit],
   )
 
   return {
@@ -184,18 +187,20 @@ export async function getGoldCaseActivity(limit = 20) {
         o.block_number::text,
         o.block_timestamp
       from gold_case_opens o
-      left join gold_case_resolutions r on r.request_id = o.request_id
+      left join gold_case_resolutions r on r.contract_address = o.contract_address and r.request_id = o.request_id
       left join lateral (
         select tier, tier_name
         from gold_case_results gr
-        where gr.request_id = o.request_id
+        where gr.contract_address = o.contract_address
+          and gr.request_id = o.request_id
         order by tier desc, payout desc, chest_index asc
         limit 1
       ) best on true
+      where o.contract_address = $2
       order by o.block_number desc, o.log_index desc
       limit $1
     `,
-    [safeLimit],
+    [safeLimit, ACTIVE_CASES_CONTRACT],
   )
 
   return {
@@ -222,9 +227,11 @@ export async function getGoldCaseStats() {
         count(*) filter (where gr.tier = 6)::text as jackpot_hits,
         max(gr.tier) as best_tier
       from gold_case_opens o
-      left join gold_case_resolutions r on r.request_id = o.request_id
-      left join gold_case_results gr on gr.request_id = o.request_id and gr.tier > 0
+      left join gold_case_resolutions r on r.contract_address = o.contract_address and r.request_id = o.request_id
+      left join gold_case_results gr on gr.contract_address = o.contract_address and gr.request_id = o.request_id and gr.tier > 0
+      where o.contract_address = $1
     `,
+    [ACTIVE_CASES_CONTRACT],
   )
 
   const row = result.rows[0]

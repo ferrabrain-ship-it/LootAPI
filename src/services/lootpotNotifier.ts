@@ -5,7 +5,7 @@ import { publicClient } from '../lib/client.js'
 import { supabaseAdmin } from '../lib/supabase.js'
 
 const ROUND_SETTLED = parseAbi([
-  'event RoundSettled(uint64 indexed roundId, uint8 winningBlock, address topMiner, uint256 totalWinnings, uint256 topMinerReward, uint256 lootpotAmount, bool isSplit, uint256 topMinerSeed, uint256 winnersDeployed)',
+  'event RoundSettled(uint64 indexed roundId, uint8 winningBlock, address topMiner, uint256 totalWinnings, uint256 topMinerReward, uint256 lootpotAmount, uint256 ethpotAmount, bool isSplit, uint256 topMinerSeed, uint256 winnersDeployed)',
 ])
 
 const LOOT_LOGO_URL = `${env.discordBotAssetBaseUrl.replace(/\/$/, '')}/loot-logo-icon.png`

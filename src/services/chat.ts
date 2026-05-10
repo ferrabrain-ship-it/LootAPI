@@ -8,6 +8,8 @@ const SESSION_TTL_SECONDS = 12 * 60 * 60
 const RATE_LIMIT_MS = 1200
 const MAX_REACTION_LENGTH = 16
 const MEMORY_MESSAGE_LIMIT = 200
+const CHAT_FULL_SELECT = 'id,wallet_address,text,created_at,reply_to_id,reactions'
+const CHAT_BASE_SELECT = 'id,wallet_address,text,created_at'
 
 export type ChatReaction = {
   emoji: string
@@ -175,26 +177,45 @@ function attachReplies(messages: ChatMessage[]) {
   })
 }
 
-async function readSupabaseMessages(limit: number, viewerAddress?: string | null) {
-  if (!supabase) return null
+function logChatStorageFallback(operation: string, error: unknown) {
+  const detail = error && typeof error === 'object' && 'message' in error
+    ? String((error as { message?: unknown }).message)
+    : String(error ?? 'unknown')
+  console.warn(`[chat] falling back to in-memory ${operation}:`, detail)
+}
 
-  const { data, error } = await supabase
-    .from('chat_messages')
-    .select('id,wallet_address,text,created_at,reply_to_id,reactions')
-    .order('created_at', { ascending: false })
-    .limit(limit)
-
-  if (error) {
-    console.warn('[chat] falling back to in-memory messages:', error.message)
-    return null
-  }
-
-  const mapped = (data ?? [])
+function mapSupabaseRows(rows: unknown[] | null, viewerAddress?: string | null) {
+  const mapped = (rows ?? [])
     .map((row) => mapRow(row as StoredChatRow, viewerAddress))
     .filter((message): message is ChatMessage => Boolean(message))
     .reverse()
 
   return attachReplies(mapped)
+}
+
+async function readSupabaseMessages(limit: number, viewerAddress?: string | null) {
+  if (!supabase) return null
+
+  const { data, error } = await supabase
+    .from('chat_messages')
+    .select(CHAT_FULL_SELECT)
+    .order('created_at', { ascending: false })
+    .limit(limit)
+
+  if (!error) return mapSupabaseRows(data, viewerAddress)
+
+  const fallback = await supabase
+    .from('chat_messages')
+    .select(CHAT_BASE_SELECT)
+    .order('created_at', { ascending: false })
+    .limit(limit)
+
+  if (fallback.error) {
+    logChatStorageFallback('messages', fallback.error)
+    return null
+  }
+
+  return mapSupabaseRows(fallback.data, viewerAddress)
 }
 
 async function insertSupabaseMessage(address: string, text: string, replyToId: string | null, viewerAddress?: string | null) {
@@ -203,15 +224,23 @@ async function insertSupabaseMessage(address: string, text: string, replyToId: s
   const { data, error } = await supabase
     .from('chat_messages')
     .insert({ wallet_address: address, text, reply_to_id: replyToId })
-    .select('id,wallet_address,text,created_at,reply_to_id,reactions')
+    .select(CHAT_FULL_SELECT)
     .single()
 
-  if (error) {
-    console.warn('[chat] falling back to in-memory insert:', error.message)
+  if (!error) return mapRow(data as StoredChatRow, viewerAddress)
+
+  const fallback = await supabase
+    .from('chat_messages')
+    .insert({ wallet_address: address, text })
+    .select(CHAT_BASE_SELECT)
+    .single()
+
+  if (fallback.error) {
+    logChatStorageFallback('insert', fallback.error)
     return null
   }
 
-  return mapRow(data as StoredChatRow, viewerAddress)
+  return mapRow(fallback.data as StoredChatRow, viewerAddress)
 }
 
 function readMemoryMessages(limit: number, viewerAddress?: string | null) {
@@ -304,7 +333,7 @@ async function toggleSupabaseReaction(messageId: string, address: string, emoji:
     .from('chat_messages')
     .update({ reactions })
     .eq('id', messageId)
-    .select('id,wallet_address,text,created_at,reply_to_id,reactions')
+    .select(CHAT_FULL_SELECT)
     .single()
 
   if (error) return null
