@@ -73,8 +73,8 @@ This repo is ready for Railway with:
 Use these Railway environment variables:
 
 ```env
-CORS_ORIGIN=https://mineloot.app
-NEXT_PUBLIC_APP_URL=https://mineloot.app
+CORS_ORIGIN=https://lootgames.app,https://www.lootgames.app
+NEXT_PUBLIC_APP_URL=https://lootgames.app
 ENABLE_LOOTPOT_WORKER=false
 ENABLE_DISCORD_PRICE_WORKER=false
 ENABLE_DISCORD_METRIC_BOTS_WORKER=false

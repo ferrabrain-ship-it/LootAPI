@@ -611,21 +611,23 @@ export async function getLootPriceCached() {
 
 export async function getStats() {
   return withCache('stats', HEAVY_ROUTE_CACHE_TTL_MS, async () => {
-    const [totalMinted, treasuryStats, price] = await Promise.all([
+    const [totalMinted, totalSupply, price] = await Promise.all([
       withRpcRetries(() => publicClient.readContract({
         address: CONTRACTS.loot,
         abi: lootAbi,
         functionName: 'totalMinted',
       }) as Promise<bigint>),
-      getTreasuryStats(),
+      withRpcRetries(() => publicClient.readContract({
+        address: CONTRACTS.loot,
+        abi: lootAbi,
+        functionName: 'totalSupply',
+      }) as Promise<bigint>),
       getLootPrice(),
     ])
-    const totalBurned = toBigInt(treasuryStats.totalBurned)
-    const circulatingSupply = totalMinted > totalBurned ? totalMinted - totalBurned : 0n
 
     return {
-      totalSupply: circulatingSupply.toString(),
-      totalSupplyFormatted: etherString(circulatingSupply),
+      totalSupply: totalSupply.toString(),
+      totalSupplyFormatted: etherString(totalSupply),
       totalMinted: totalMinted.toString(),
       totalMintedFormatted: etherString(totalMinted),
       ...price.payload,
