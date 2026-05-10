@@ -130,9 +130,9 @@ const goldCaseTiers = [
   { name: 'Rare', multiplierLabel: '1x', multiplierBps: 10_000n },
   { name: 'Epic', multiplierLabel: '3x', multiplierBps: 30_000n },
   { name: 'Legendary', multiplierLabel: '10x', multiplierBps: 100_000n },
-  { name: '25x', multiplierLabel: '25x', multiplierBps: 250_000n },
+  { name: 'Relic', multiplierLabel: '25x', multiplierBps: 250_000n },
   { name: 'Mythic', multiplierLabel: '50x', multiplierBps: 500_000n },
-  { name: '100x', multiplierLabel: '100x', multiplierBps: 1_000_000n },
+  { name: 'Crown', multiplierLabel: '100x', multiplierBps: 1_000_000n },
   { name: 'Jackpot', multiplierLabel: '80% pool', multiplierBps: null },
 ] as const
 
@@ -1037,6 +1037,16 @@ async function syncCrownRoundSettled(client: PoolClient, latestBlock: bigint) {
       settledTxHash: log.transactionHash,
       settledAtMs: timestampMs,
     })
+    await runWriteQuery(
+      `
+        update crown_rounds
+        set prize_pool = $3,
+            updated_at = now()
+        where contract_address = $1
+          and round_id = $2
+      `,
+      [ACTIVE_CROWN_CONTRACT, roundId.toString(), toBigInt(log.args.prize).toString()]
+    )
   })
 
   await updateSyncState(client, streamName, latestBlock)

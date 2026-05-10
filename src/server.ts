@@ -186,6 +186,18 @@ app.get('/api/crown/skill/context', async (req) => {
   return getCrownSkillContext(user ? asAddress(user) : undefined)
 })
 
+app.get('/api/cases/activity', async (req) => {
+  const { limit = '20' } = req.query as Record<string, string | undefined>
+  return getGoldCaseActivity(Number(limit))
+})
+
+app.get('/api/cases/best-wins', async (req) => {
+  const { limit = '10' } = req.query as Record<string, string | undefined>
+  return getGoldCaseBestWins(Number(limit))
+})
+
+app.get('/api/cases/stats', async () => getGoldCaseStats())
+
 app.get('/api/gold-cases/activity', async (req) => {
   const { limit = '20' } = req.query as Record<string, string | undefined>
   return getGoldCaseActivity(Number(limit))

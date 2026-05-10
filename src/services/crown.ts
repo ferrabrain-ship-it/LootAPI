@@ -27,6 +27,8 @@ type CurrentRoundInfo = readonly [
   bigint,
 ]
 
+type CurrentRoundPotsInfo = readonly [bigint, bigint, bigint, bigint, bigint]
+
 type RoundStorageInfo = readonly [
   bigint,
   bigint,
@@ -194,6 +196,14 @@ async function readCurrentRoundInfo() {
   }) as Promise<CurrentRoundInfo>
 }
 
+async function readCurrentRoundPots() {
+  return publicClient.readContract({
+    address: CONTRACTS.crown,
+    abi: crownAbi,
+    functionName: 'getCurrentRoundPots',
+  }) as Promise<CurrentRoundPotsInfo>
+}
+
 async function readRoundStorage(roundId: bigint) {
   return publicClient.readContract({
     address: CONTRACTS.crown,
@@ -217,6 +227,15 @@ async function readClaimablePrize(user: Address) {
     address: CONTRACTS.crown,
     abi: crownAbi,
     functionName: 'claimablePrize',
+    args: [user],
+  }) as Promise<bigint>
+}
+
+async function readClaimableLootPrize(user: Address) {
+  return publicClient.readContract({
+    address: CONTRACTS.crown,
+    abi: crownAbi,
+    functionName: 'claimableLootPrize',
     args: [user],
   }) as Promise<bigint>
 }
@@ -450,6 +469,7 @@ export async function getCrownCurrent(user?: string) {
   return withCache(`crown:current:${userAddress ?? 'global'}`, CROWN_CACHE_TTL_MS, async () => {
     const [
       info,
+      pots,
       gameStarted,
       canRequestRoll,
       basePrice,
@@ -457,6 +477,7 @@ export async function getCrownCurrent(user?: string) {
       maxPrice,
     ] = await Promise.all([
       readCurrentRoundInfo(),
+      readCurrentRoundPots(),
       publicClient.readContract({ address: CONTRACTS.crown, abi: crownAbi, functionName: 'gameStarted' }) as Promise<boolean>,
       publicClient.readContract({ address: CONTRACTS.crown, abi: crownAbi, functionName: 'canRequestRoll' }) as Promise<boolean>,
       publicClient.readContract({ address: CONTRACTS.crown, abi: crownAbi, functionName: 'basePrice' }) as Promise<bigint>,
@@ -483,8 +504,14 @@ export async function getCrownCurrent(user?: string) {
       totalSold: info[5].toString(),
       prizePool: info[6].toString(),
       prizePoolFormatted: ethFixed(info[6], 6),
+      ethPrizePool: pots[1].toString(),
+      ethPrizePoolFormatted: ethFixed(pots[1], 6),
+      lootPrizePool: pots[2].toString(),
+      lootPrizePoolFormatted: ethFixed(pots[2], 4),
       currentPrice: info[7].toString(),
       currentPriceFormatted: ethFixed(info[7], 6),
+      currentLootPrice: pots[4].toString(),
+      currentLootPriceFormatted: ethFixed(pots[4], 4),
       currentLeader: info[8],
       leaderChests: info[9].toString(),
       timeRemaining: Number(info[10]),
@@ -719,9 +746,10 @@ export async function getCrownUser(addressInput: string) {
   const user = getAddress(addressInput)
   return withCache(`crown:user:${user}`, CROWN_CACHE_TTL_MS, async () => {
     const current = await readCurrentRoundInfo()
-    const [holderInfo, claimablePrize, autoConfig, autoState, autoCanExecute] = await Promise.all([
+    const [holderInfo, claimablePrize, claimableLootPrize, autoConfig, autoState, autoCanExecute] = await Promise.all([
       current[0] > 0n ? readHolderInfo(current[0], user) : Promise.resolve([0n, 0n, 0n] as HolderInfo),
       readClaimablePrize(user),
+      readClaimableLootPrize(user),
       readAutoCrownConfig(user).catch(() => null),
       readAutoCrownState(user).catch(() => null),
       readAutoCrownCanExecute(user).catch(() => false),
@@ -736,6 +764,8 @@ export async function getCrownUser(addressInput: string) {
       pendingDividendsFormatted: ethFixed(holderInfo[2], 6),
       claimablePrize: claimablePrize.toString(),
       claimablePrizeFormatted: ethFixed(claimablePrize, 6),
+      claimableLootPrize: claimableLootPrize.toString(),
+      claimableLootPrizeFormatted: ethFixed(claimableLootPrize, 4),
       autoCrown: autoConfig && autoState ? {
         active: autoConfig[0],
         openNewRound: autoConfig[1],
@@ -777,7 +807,7 @@ export async function getCrownSkillContext(addressInput?: string) {
   return {
     generatedAt: new Date().toISOString(),
     game: 'Crown',
-    objective: 'Buy chests to become the current leader. If the executor roll hits 1000, the current leader wins the ETH prize pool.',
+    objective: 'Buy ETH or LOOT chests to become the current leader. If the executor roll hits 1000, the current leader wins 80% of the ETH and LOOT prize pools.',
     contracts: {
       crown: CONTRACTS.crown,
       autoCrown: CONTRACTS.autoCrown,
@@ -793,6 +823,13 @@ export async function getCrownSkillContext(addressInput?: string) {
         lockRewardsBps: 400,
         adminBps: 300,
       },
+      lootChestFeeSplit: {
+        lootPrizePoolBps: 8500,
+        buybackBps: 800,
+        lockRewardsBps: 400,
+        adminBps: 300,
+      },
+      winnerPayoutBps: 8000,
       note: 'Do not route gameplay transactions through the API. The API is read-only context; users and agents submit transactions directly to Crown or AutoCrown.',
     },
     current,

@@ -50,7 +50,7 @@ type GoldCaseStatsRow = {
   best_tier: number | null
 }
 
-const tierLabels = ['Empty', 'Common', 'Rare', 'Epic', 'Legendary', '25x', 'Mythic', '100x', 'Jackpot']
+const tierLabels = ['Empty', 'Common', 'Rare', 'Epic', 'Legendary', 'Relic', 'Mythic', 'Crown', 'Jackpot']
 
 function toBigInt(value: string | number | bigint | null | undefined) {
   if (value == null) return 0n

@@ -102,7 +102,7 @@ function normalizeEmoji(emoji: unknown) {
 }
 
 function sessionMessage(address: string, issuedAt: number) {
-  return `MineLoot Chat Session\nAddress: ${address}\nIssued At: ${issuedAt}`
+  return `LootGames Chat Session\nAddress: ${address}\nIssued At: ${issuedAt}`
 }
 
 function normalizeReactionMap(value: unknown): StoredReactionMap {
